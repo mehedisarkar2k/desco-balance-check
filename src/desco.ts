@@ -4,8 +4,6 @@ import https from "https";
 
 dotenv.config();
 
-const { ACCOUNT_NO, METER_NO } = process.env;
-
 export interface DescoResponse {
     balance: number;
     currentMonthConsumption: number;
@@ -15,7 +13,6 @@ export interface DescoResponse {
 export interface FetchBalanceParams {
     accountNo?: string;
     meterNo?: string;
-    useDefaults?: boolean; // Flag to indicate whether to use env defaults
 }
 
 const API_ENDPOINTS = [
@@ -34,11 +31,26 @@ async function tryFetchFromEndpoint(url: string, params: FetchBalanceParams): Pr
         }
 
         const fullUrl = `${url}?${queryParams.toString()}`;
+
+        console.log(`Fetching from: ${fullUrl}`);
+
         const { data } = await axios.get(fullUrl, {
-            timeout: 10000,
+            timeout: 15000, // Increased timeout to 15 seconds
             httpsAgent: new https.Agent({
                 rejectUnauthorized: false
-            })
+            }),
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
+                'Referer': 'https://prepaid.desco.org.bd/',
+                'Origin': 'https://prepaid.desco.org.bd'
+            },
+            validateStatus: (status) => status < 500 // Don't throw on 4xx errors
         });
 
         console.log(`API Response from ${url}:`, JSON.stringify(data));
@@ -55,10 +67,17 @@ async function tryFetchFromEndpoint(url: string, params: FetchBalanceParams): Pr
                 console.warn(`Incomplete data from ${url}:`, data.data);
                 return null;
             }
+        } else if (data.code) {
+            console.warn(`API returned code ${data.code}:`, data.message || data);
         }
+
         return null;
     } catch (error: any) {
         console.error(`Error fetching from ${url}:`, error.message);
+        if (error.response) {
+            console.error(`Response status: ${error.response.status}`);
+            console.error(`Response data:`, error.response.data);
+        }
         return null;
     }
 }
@@ -68,19 +87,24 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
     data?: DescoResponse;
     error?: string;
     attemptedUrls?: string[];
+    apiResponses?: any[]; // Store actual API responses for debugging
 }> {
-    // If useDefaults is true or params is undefined, use env variables as fallback
-    const useEnvDefaults = !params || params.useDefaults;
+    // Require params to be provided
+    if (!params) {
+        return { success: false, error: "Account parameters are required" };
+    }
 
-    const accountNo = params?.accountNo || (useEnvDefaults ? ACCOUNT_NO : undefined);
-    const meterNo = params?.meterNo || (useEnvDefaults ? METER_NO : undefined);
+    const { accountNo, meterNo } = params;
 
     // Both cannot be empty
     if (!accountNo && !meterNo) {
         return { success: false, error: "Either Account Number or Meter Number is required" };
     }
 
+    console.log(`Fetching balance for Account: ${accountNo || 'N/A'}, Meter: ${meterNo || 'N/A'}`);
+
     const attemptedUrls: string[] = [];
+    const apiResponses: any[] = [];
 
     // Try both endpoints
     for (const endpoint of API_ENDPOINTS) {
@@ -96,13 +120,23 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
 
         const result = await tryFetchFromEndpoint(endpoint, { accountNo, meterNo });
         if (result) {
+            console.log(`✅ Successfully fetched balance for ${accountNo || meterNo}`);
             return { success: true, data: result };
+        } else {
+            // Store the failed attempt
+            apiResponses.push({
+                endpoint,
+                params: { accountNo, meterNo }
+            });
         }
     }
+
+    console.error(`❌ All API endpoints failed for Account: ${accountNo}, Meter: ${meterNo}`);
 
     return {
         success: false,
         error: "Failed to fetch balance from both API endpoints",
-        attemptedUrls
+        attemptedUrls,
+        apiResponses
     };
 }

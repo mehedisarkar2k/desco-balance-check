@@ -18,10 +18,7 @@ export async function handleCallbackQuery(ctx: Context) {
         return;
     }
 
-    if (data === "use_default") {
-        await ctx.reply("Fetching balance using default account... ⏳");
-        await performBalanceCheck(ctx, { useDefaults: true });
-    } else if (data === "use_saved") {
+    if (data === "use_saved") {
         const user = await UserService.getUser(userId);
         if (!user || (!user.accountNo && !user.meterNo)) {
             await ctx.reply("❌ No saved account details found. Please use /start to set up.");

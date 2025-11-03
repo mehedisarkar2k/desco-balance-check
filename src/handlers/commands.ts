@@ -124,17 +124,8 @@ export async function handleBalance(ctx: Context) {
 
     const user = await UserService.getUser(userId);
 
-    // Check if user is admin
-    if (username === ADMIN_USERNAME) {
-        await ctx.reply(
-            "Choose an option:",
-            Markup.inlineKeyboard([
-                [Markup.button.callback("Use Default Account", "use_default")],
-                [Markup.button.callback("Use My Saved Account", "use_saved")],
-                [Markup.button.callback("Enter Custom Details", "enter_custom")]
-            ])
-        );
-    } else if (user && (user.accountNo || user.meterNo)) {
+    // All users follow the same flow - no admin special treatment
+    if (user && (user.accountNo || user.meterNo)) {
         // User has saved account details
         await ctx.reply(
             "Choose an option:",

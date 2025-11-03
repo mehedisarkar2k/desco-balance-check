@@ -4,18 +4,17 @@ import { sendMessage, ADMIN_CHAT_ID } from "../bot";
 
 export async function performBalanceCheck(
     ctx: Context,
-    params: { accountNo?: string; meterNo?: string; useDefaults?: boolean }
+    params: { accountNo?: string; meterNo?: string }
 ) {
-    // Validate that at least one parameter is provided when not using defaults
-    if (!params.useDefaults && !params.accountNo && !params.meterNo) {
+    // Validate that at least one parameter is provided
+    if (!params.accountNo && !params.meterNo) {
         await ctx.reply("❌ Please provide either Account Number or Meter Number.");
         return;
     }
 
     const result = await fetchBalance({
         accountNo: params.accountNo,
-        meterNo: params.meterNo,
-        useDefaults: params.useDefaults
+        meterNo: params.meterNo
     });
 
     if (result.success && result.data) {

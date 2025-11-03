@@ -6,7 +6,6 @@ import { bot } from "./bot";
 
 const threshold = Number(process.env.THRESHOLD) || 100;
 
-let hourlyTask: cron.ScheduledTask | null = null;
 const scheduledTasks: Map<string, cron.ScheduledTask> = new Map();
 
 function formatMsg(balance: number, consumption: number, readingTime: string, prefix = "") {
@@ -18,10 +17,15 @@ function formatMsg(balance: number, consumption: number, readingTime: string, pr
 
 async function checkAndNotifyUser(userId: number, accountNo?: string, meterNo?: string, userThreshold?: number, isHourlyCheck = false) {
     try {
+        // Skip if user doesn't have account details
+        if (!accountNo && !meterNo) {
+            console.warn(`User ${userId} has no account details, skipping notification`);
+            return null;
+        }
+
         const result = await fetchBalance({
             accountNo,
-            meterNo,
-            useDefaults: !accountNo && !meterNo
+            meterNo
         });
 
         if (!result.success || !result.data) {
@@ -62,43 +66,7 @@ async function checkAndNotifyUser(userId: number, accountNo?: string, meterNo?: 
     }
 }
 
-async function checkAndNotify(prefix = "") {
-    try {
-        const result = await fetchBalance({ useDefaults: true });
-
-        if (!result.success || !result.data) {
-            await sendMessage(`<b>❌ Error checking DESCO:</b> ${result.error || "Unknown error"}`);
-            return;
-        }
-
-        const { balance, currentMonthConsumption, readingTime } = result.data;
-        await sendMessage(formatMsg(balance, currentMonthConsumption, readingTime, prefix));
-
-        if (balance <= threshold) {
-            await sendMessage(`<b>⚠️ Low balance (≤ ${threshold})</b> — hourly alerts ON`);
-            enableHourlyAlerts();
-        } else {
-            disableHourlyAlerts();
-        }
-    } catch (err: any) {
-        await sendMessage(`<b>❌ Error checking DESCO:</b> ${err.message}`);
-    }
-}
-
-function enableHourlyAlerts() {
-    if (hourlyTask) return;
-    hourlyTask = cron.schedule("0 * * * *", () => checkAndNotify("Hourly check"), {
-        timezone: process.env.TZ || "Asia/Dhaka"
-    });
-    hourlyTask.start();
-}
-
-function disableHourlyAlerts() {
-    if (hourlyTask) {
-        hourlyTask.stop();
-        hourlyTask = null;
-    }
-}
+// Removed admin default balance check function and hourly alerts - all users must have their own accounts
 
 // Setup user-specific notifications
 async function setupUserNotifications() {
@@ -178,13 +146,8 @@ async function checkHourlyLowBalance() {
     }
 }
 
-// Daily scheduled checks for admin (8AM & 4PM)
+// Daily scheduled checks and alerts
 export async function startScheduler() {
-    // Admin notifications
-    cron.schedule("0 8,16 * * *", () => checkAndNotify("Scheduled"), {
-        timezone: process.env.TZ || "Asia/Dhaka",
-    });
-
     // Hourly checks for low balance alerts
     cron.schedule("0 * * * *", async () => {
         console.log("Running hourly low balance checks...");
@@ -198,9 +161,6 @@ export async function startScheduler() {
 
     // Schedule periodic refresh
     scheduleRefresh();
-
-    // Initial admin check
-    checkAndNotify("Startup");
 
     console.log("✅ Scheduler started successfully");
 }
