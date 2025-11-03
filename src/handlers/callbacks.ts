@@ -27,6 +27,9 @@ export async function handleCallbackQuery(ctx: Context) {
             await ctx.reply("❌ No saved account details found. Please use /start to set up.");
             return;
         }
+
+        console.log(`User ${userId} requesting balance with accountNo: ${user.accountNo}, meterNo: ${user.meterNo}`);
+
         await ctx.reply("Fetching balance using your saved account... ⏳");
         await performBalanceCheck(ctx, {
             accountNo: user.accountNo,

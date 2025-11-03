@@ -41,12 +41,24 @@ async function tryFetchFromEndpoint(url: string, params: FetchBalanceParams): Pr
             })
         });
 
+        console.log(`API Response from ${url}:`, JSON.stringify(data));
+
         if (data.code === 200 && data.data) {
             const { balance, currentMonthConsumption, readingTime } = data.data;
-            return { balance, currentMonthConsumption, readingTime };
+
+            // Validate data fields
+            if (balance !== null && balance !== undefined &&
+                currentMonthConsumption !== null && currentMonthConsumption !== undefined &&
+                readingTime) {
+                return { balance, currentMonthConsumption, readingTime };
+            } else {
+                console.warn(`Incomplete data from ${url}:`, data.data);
+                return null;
+            }
         }
         return null;
-    } catch (error) {
+    } catch (error: any) {
+        console.error(`Error fetching from ${url}:`, error.message);
         return null;
     }
 }
