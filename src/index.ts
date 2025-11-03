@@ -26,6 +26,16 @@ bot.on("text", handleTextMessage);
 
 (async () => {
     try {
+        // Check environment
+        const environment = process.env.NODE_ENV || 'development';
+        console.log(`🚀 Starting bot in ${environment} mode...`);
+
+        // Warn if potentially running duplicate instances
+        if (environment === 'development') {
+            console.log('⚠️  Running in DEVELOPMENT mode');
+            console.log('⚠️  Make sure production instance is STOPPED to avoid conflicts!');
+        }
+
         // Start health check server (required for Render)
         console.log("Starting health check server...");
         startHealthCheckServer();
@@ -39,14 +49,18 @@ bot.on("text", handleTextMessage);
 
         console.log("Launching the TG bot with retry logic...");
         await startBotWithRetry(bot);
-        await sendMessage("<i>Bot started successfully.</i>");
+        await sendMessage("<i>Bot started successfully in " + environment + " mode.</i>");
         startScheduler();
 
+        console.log(`✅ Bot is running and ready to serve multiple users!`);
+
         process.once("SIGINT", async () => {
+            console.log("🛑 Shutting down gracefully...");
             bot.stop("SIGINT");
             process.exit(0);
         });
         process.once("SIGTERM", async () => {
+            console.log("🛑 Shutting down gracefully...");
             bot.stop("SIGTERM");
             process.exit(0);
         });

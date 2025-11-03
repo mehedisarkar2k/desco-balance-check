@@ -3,13 +3,13 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const DB_URL = process.env.DB_URL;
+const DB_URL = process.env.DB_URL || process.env.MONGODB_URI;
 const DB_NAME = "desco-balance-check";
 
 export async function connectDatabase() {
     try {
         if (!DB_URL) {
-            throw new Error("DB_URL is not defined in environment variables");
+            throw new Error("DB_URL or MONGODB_URI is not defined in environment variables");
         }
 
         await mongoose.connect(DB_URL, {
