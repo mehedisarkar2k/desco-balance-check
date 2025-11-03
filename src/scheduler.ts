@@ -10,8 +10,12 @@ const scheduledTasks: Map<string, cron.ScheduledTask> = new Map();
 
 function formatMsg(balance: number, consumption: number, readingTime: string, prefix = "") {
     const head = prefix ? `<b>${prefix}</b>\n` : "";
+    const consumptionDisplay = consumption > 0
+        ? `<code>${consumption.toFixed(3)} kWh</code>`
+        : `<code>N/A</code>`;
+
     return `${head}<b>💰 DESCO Balance:</b> <code>${balance.toFixed(2)} BDT</code>\n` +
-        `⚡ <b>Consumption:</b> <code>${consumption.toFixed(3)} kWh</code>\n` +
+        `⚡ <b>Consumption:</b> ${consumptionDisplay}\n` +
         `📅 <b>Reading:</b> <code>${readingTime}</code>`;
 }
 

@@ -58,11 +58,13 @@ async function tryFetchFromEndpoint(url: string, params: FetchBalanceParams): Pr
         if (data.code === 200 && data.data) {
             const { balance, currentMonthConsumption, readingTime } = data.data;
 
-            // Validate data fields
-            if (balance !== null && balance !== undefined &&
-                currentMonthConsumption !== null && currentMonthConsumption !== undefined &&
-                readingTime) {
-                return { balance, currentMonthConsumption, readingTime };
+            // Validate essential data fields (currentMonthConsumption can be null)
+            if (balance !== null && balance !== undefined && readingTime) {
+                return {
+                    balance,
+                    currentMonthConsumption: currentMonthConsumption ?? 0, // Default to 0 if null
+                    readingTime
+                };
             } else {
                 console.warn(`Incomplete data from ${url}:`, data.data);
                 return null;

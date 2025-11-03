@@ -20,15 +20,17 @@ export async function performBalanceCheck(
     if (result.success && result.data) {
         const { balance, currentMonthConsumption, readingTime } = result.data;
 
-        // Validate that all required fields are present
-        if (balance !== null && balance !== undefined &&
-            currentMonthConsumption !== null && currentMonthConsumption !== undefined &&
-            readingTime) {
+        // Validate that essential fields are present (consumption can be 0)
+        if (balance !== null && balance !== undefined && readingTime) {
+            const consumptionDisplay = currentMonthConsumption > 0
+                ? `<code>${currentMonthConsumption.toFixed(2)} kWh</code>`
+                : `<code>N/A</code>`;
+
             const message = `
 ✅ <b>DESCO Balance</b>
 
 💰 <b>Balance:</b> <code>${balance.toFixed(2)} BDT</code>
-⚡ <b>Consumption:</b> <code>${currentMonthConsumption.toFixed(2)} kWh</code>
+⚡ <b>Consumption:</b> ${consumptionDisplay}
 📅 <b>Reading Time:</b> <code>${readingTime}</code>
 `;
             await ctx.reply(message, { parse_mode: "HTML" });
