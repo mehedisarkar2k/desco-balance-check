@@ -12,7 +12,7 @@ export async function startBotWithRetry(bot: Telegraf, maxRetries = 5) {
         console.log("🔄 Removing any existing webhook...");
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         console.log("✅ Webhook removed (if any existed)");
-        
+
         // Wait a bit after webhook deletion to ensure cleanup
         console.log("⏳ Waiting 3 seconds for cleanup...");
         await new Promise(resolve => setTimeout(resolve, 3000));
