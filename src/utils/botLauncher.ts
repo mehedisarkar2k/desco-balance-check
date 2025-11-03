@@ -5,13 +5,27 @@ import { Telegraf } from "telegraf";
  */
 export async function startBotWithRetry(bot: Telegraf, maxRetries = 5) {
     let retries = 0;
-    const baseDelay = 5000; // 5 seconds
+    const baseDelay = 10000; // 10 seconds (increased from 5s)
+
+    // First, try to delete any existing webhook to ensure we can use polling
+    try {
+        console.log("🔄 Removing any existing webhook...");
+        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+        console.log("✅ Webhook removed (if any existed)");
+        
+        // Wait a bit after webhook deletion to ensure cleanup
+        console.log("⏳ Waiting 3 seconds for cleanup...");
+        await new Promise(resolve => setTimeout(resolve, 3000));
+    } catch (webhookError: any) {
+        console.warn("⚠️ Could not delete webhook (might not exist):", webhookError.message);
+    }
 
     while (retries < maxRetries) {
         try {
             console.log(`Launching bot... (Attempt ${retries + 1}/${maxRetries})`);
             await bot.launch({
                 dropPendingUpdates: true, // Ignore old updates
+                allowedUpdates: [], // First launch with no updates
             });
             console.log("✅ Bot launched successfully");
             return; // Success!

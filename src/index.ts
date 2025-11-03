@@ -50,6 +50,16 @@ bot.on("text", handleTextMessage);
         if (environment === 'development') {
             console.log('⚠️  Running in DEVELOPMENT mode');
             console.log('⚠️  Make sure production instance is STOPPED to avoid conflicts!');
+            console.log('⚠️  If you see 409 errors, another instance is already running!');
+        }
+
+        // Check if bot is already running by trying to get bot info
+        try {
+            const botInfo = await bot.telegram.getMe();
+            console.log(`✅ Bot authenticated as: @${botInfo.username}`);
+        } catch (authError: any) {
+            console.error('❌ Failed to authenticate bot:', authError.message);
+            throw new Error('Bot token invalid or network issue');
         }
 
         // Start health check server (required for Render)
