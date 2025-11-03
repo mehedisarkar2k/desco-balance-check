@@ -19,7 +19,10 @@ export const ADMIN_CHAT_ID = 932626321;
 export async function sendMessage(text: string, targetChatId?: number | string) {
     try {
         await bot.telegram.sendMessage(targetChatId || chatId, text, { parse_mode: "HTML" });
+        console.log(`✅ Message sent to ${targetChatId || chatId}`);
     } catch (err: any) {
-        console.error("Failed to send Telegram message:", err.message);
+        console.error("❌ Failed to send Telegram message:", err.message);
+        console.error("Message was:", text.substring(0, 100));
+        // Don't throw - let the app continue running
     }
 }

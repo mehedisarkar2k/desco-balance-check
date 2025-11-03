@@ -12,6 +12,22 @@ import { startBotWithRetry } from "./utils/botLauncher";
 // Apply middleware
 bot.use(autoRegisterMiddleware);
 
+// Global error handler for bot errors
+bot.catch(async (err: any, ctx: any) => {
+    console.error("❌ Bot error:", err);
+    try {
+        await sendMessage(
+            `🚨 <b>Bot Error</b>\n\n` +
+            `<b>Error:</b> ${err.message}\n` +
+            `<b>User:</b> ${ctx.from?.id || 'Unknown'}\n` +
+            `<b>Update:</b> ${ctx.updateType}`,
+            932626321 // Your admin chat ID
+        );
+    } catch (notifyError) {
+        console.error("Failed to send error notification:", notifyError);
+    }
+});
+
 // Register command handlers
 bot.command("start", handleStart);
 bot.command("help", handleHelp);
@@ -56,16 +72,71 @@ bot.on("text", handleTextMessage);
 
         process.once("SIGINT", async () => {
             console.log("🛑 Shutting down gracefully...");
+            await sendMessage("⏸️ <i>Bot shutting down...</i>", 932626321);
             bot.stop("SIGINT");
             process.exit(0);
         });
         process.once("SIGTERM", async () => {
             console.log("🛑 Shutting down gracefully...");
+            await sendMessage("⏸️ <i>Bot shutting down...</i>", 932626321);
             bot.stop("SIGTERM");
             process.exit(0);
         });
-    } catch (error) {
-        console.error("Failed to start bot:", error);
+    } catch (error: any) {
+        console.error("❌ Failed to start bot:", error);
+
+        // Try to send error notification to admin
+        try {
+            // Create a temporary bot instance just for sending the error
+            const { Telegraf } = require("telegraf");
+            const errorBot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN || "");
+
+            await errorBot.telegram.sendMessage(
+                932626321,
+                `🚨 <b>Bot Startup Failed</b>\n\n` +
+                `<b>Error:</b> ${error.message}\n` +
+                `<b>Stack:</b> <code>${error.stack?.substring(0, 500)}</code>\n` +
+                `<b>Time:</b> ${new Date().toISOString()}`,
+                { parse_mode: "HTML" }
+            );
+        } catch (notifyError) {
+            console.error("❌ Failed to send startup error notification:", notifyError);
+        }
+
         process.exit(1);
     }
 })();
+
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+    console.error('❌ Uncaught Exception:', error);
+
+    try {
+        await sendMessage(
+            `🚨 <b>Uncaught Exception</b>\n\n` +
+            `<b>Error:</b> ${error.message}\n` +
+            `<b>Stack:</b> <code>${error.stack?.substring(0, 500)}</code>`,
+            932626321
+        );
+    } catch (err) {
+        console.error("Failed to send exception notification");
+    }
+
+    process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', async (reason: any) => {
+    console.error('❌ Unhandled Rejection:', reason);
+
+    try {
+        await sendMessage(
+            `🚨 <b>Unhandled Promise Rejection</b>\n\n` +
+            `<b>Reason:</b> ${reason?.message || reason}\n` +
+            `<b>Stack:</b> <code>${reason?.stack?.substring(0, 500) || 'No stack trace'}</code>`,
+            932626321
+        );
+    } catch (err) {
+        console.error("Failed to send rejection notification");
+    }
+});

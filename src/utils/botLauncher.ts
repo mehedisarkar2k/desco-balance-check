@@ -19,8 +19,38 @@ export async function startBotWithRetry(bot: Telegraf, maxRetries = 5) {
             retries++;
             console.error(`❌ Bot launch failed (Attempt ${retries}/${maxRetries}):`, error.message);
 
+            // Send notification on first failure
+            if (retries === 1) {
+                try {
+                    await bot.telegram.sendMessage(
+                        932626321,
+                        `⚠️ <b>Bot Launch Issue</b>\n\n` +
+                        `<b>Error:</b> ${error.message}\n` +
+                        `<b>Retrying...</b> (${maxRetries} attempts total)`,
+                        { parse_mode: "HTML" }
+                    );
+                } catch (notifyErr) {
+                    console.error("Failed to send retry notification");
+                }
+            }
+
             if (retries >= maxRetries) {
                 console.error("🚨 Max retries reached. Exiting...");
+
+                // Send final failure notification
+                try {
+                    await bot.telegram.sendMessage(
+                        932626321,
+                        `🚨 <b>Bot Launch Failed</b>\n\n` +
+                        `<b>Error:</b> ${error.message}\n` +
+                        `<b>Attempts:</b> ${maxRetries}\n` +
+                        `<b>Action Required:</b> Check logs and fix the issue`,
+                        { parse_mode: "HTML" }
+                    );
+                } catch (notifyErr) {
+                    console.error("Failed to send failure notification");
+                }
+
                 throw error;
             }
 
