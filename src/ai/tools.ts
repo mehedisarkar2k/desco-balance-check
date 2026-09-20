@@ -251,8 +251,9 @@ const TOOLS: Record<string, Tool> = {
             description:
                 "How this month's electricity is being priced: consumption and cost so far, the average rate " +
                 "paid per kWh, what the next kWh costs right now, what it cost at the start of the month, and " +
-                "the rate bands (slabs) observed. Use for questions about slabs, rates, why cost per unit " +
-                "changed, or why electricity seems more expensive later in the month.",
+                "the rate bands (slabs) observed with the dates each applied, and the dates the rate stepped " +
+                "up. Use for questions about slabs, rates, when the slab changed, why cost per unit changed, " +
+                "or why electricity seems more expensive later in the month.",
         },
         handler: async (_args, ctx) => {
             const params = requireAccount(ctx);

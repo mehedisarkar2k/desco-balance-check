@@ -21,6 +21,8 @@ export interface CurvePoint {
     units: number;
     /** Month-to-date cost in BDT. */
     taka: number;
+    /** Reading date, so a band change can be reported as a date not just a kWh level. */
+    date: string;
 }
 
 export interface MonthCurve {
@@ -55,7 +57,8 @@ export function buildMonthCurves(rows: DailyConsumption[]): MonthCurve[] {
             if (!prev || prev.date.slice(0, 7) === month) return;
 
             baselines.set(month, prev.consumedUnit);
-            curves.set(month, { month, points: [{ units: 0, taka: 0 }] });
+            // The origin is the previous month's closing reading.
+            curves.set(month, { month, points: [{ units: 0, taka: 0, date: prev.date }] });
         }
 
         const baseline = baselines.get(month);
@@ -64,7 +67,7 @@ export function buildMonthCurves(rows: DailyConsumption[]): MonthCurve[] {
         const units = row.consumedUnit - baseline;
         if (units <= 0) return;
 
-        curves.get(month)!.points.push({ units, taka: row.consumedTaka });
+        curves.get(month)!.points.push({ units, taka: row.consumedTaka, date: row.date });
     });
 
     return [...curves.values()]
@@ -113,6 +116,17 @@ export interface TariffBand {
     fromKwh: number;
     toKwh: number;
     ratePerKwh: number;
+    /** First and last reading date priced at this rate. */
+    fromDate: string;
+    toDate: string;
+}
+
+export interface BandChange {
+    /** The reading on which the new rate first showed. */
+    date: string;
+    atKwh: number;
+    fromRate: number;
+    toRate: number;
 }
 
 export interface TariffBreakdown {
@@ -126,6 +140,8 @@ export interface TariffBreakdown {
     /** What the first kWh of the month cost, for comparison. */
     openingRatePerKwh: number;
     bands: TariffBand[];
+    /** Where the rate stepped up, so "when did my slab change" is answerable. */
+    changes: BandChange[];
 }
 
 /** Two rates close enough to be the same band, allowing for rounding. */
@@ -143,7 +159,7 @@ function sameRate(a: number, b: number): boolean {
  */
 export function deriveBands(curve: MonthCurve): TariffBand[] {
     const points = curve.points;
-    const segments: Array<{ from: number; to: number; rate: number }> = [];
+    const segments: Array<{ from: number; to: number; rate: number; fromDate: string; toDate: string }> = [];
 
     for (let i = 1; i < points.length; i++) {
         const span = points[i].units - points[i - 1].units;
@@ -153,6 +169,8 @@ export function deriveBands(curve: MonthCurve): TariffBand[] {
             from: points[i - 1].units,
             to: points[i].units,
             rate: (points[i].taka - points[i - 1].taka) / span,
+            fromDate: points[i - 1].date,
+            toDate: points[i].date,
         });
     }
 
@@ -165,6 +183,8 @@ export function deriveBands(curve: MonthCurve): TariffBand[] {
                 fromKwh: Number(run[0].from.toFixed(2)),
                 toKwh: Number(run[run.length - 1].to.toFixed(2)),
                 ratePerKwh: Number((run.reduce((s, x) => s + x.rate, 0) / run.length).toFixed(3)),
+                fromDate: run[0].toDate,
+                toDate: run[run.length - 1].toDate,
             });
         }
         run = [];
@@ -197,6 +217,15 @@ export function describeTariff(curve: MonthCurve): TariffBreakdown | null {
     // A small step forward prices the next unit at the current position.
     const currentRate = costUpTo(curve, latest.units + 1) - costUpTo(curve, latest.units);
 
+    // Each gap between consecutive bands is a crossing; the later band's first
+    // reading is the point at which the new rate became visible.
+    const changes: BandChange[] = bands.slice(1).map((band, i) => ({
+        date: band.fromDate,
+        atKwh: Number(band.fromKwh.toFixed(2)),
+        fromRate: bands[i].ratePerKwh,
+        toRate: band.ratePerKwh,
+    }));
+
     return {
         month: curve.month,
         monthToDateKwh: Number(latest.units.toFixed(2)),
@@ -205,6 +234,7 @@ export function describeTariff(curve: MonthCurve): TariffBreakdown | null {
         currentRatePerKwh: Number(currentRate.toFixed(3)),
         openingRatePerKwh: Number((first.taka / first.units).toFixed(3)),
         bands,
+        changes,
     };
 }
 
