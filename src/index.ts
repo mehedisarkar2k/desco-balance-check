@@ -8,6 +8,7 @@ import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleS
 import { handleCallbackQuery } from "./handlers/callbacks";
 import { handleTextMessage } from "./handlers/textMessages";
 import { startBotWithRetry } from "./utils/botLauncher";
+import { BOT_COMMANDS } from "./botCommands";
 
 // Apply middleware
 bot.use(autoRegisterMiddleware);
@@ -76,6 +77,16 @@ bot.on("text", handleTextMessage);
 
         console.log("Launching the TG bot with retry logic...");
         await startBotWithRetry(bot);
+
+        // Telegram keeps the command menu server-side, so it has to be pushed
+        // on every start or it silently keeps whatever was set previously.
+        try {
+            await bot.telegram.setMyCommands([...BOT_COMMANDS]);
+            console.log(`✅ Registered ${BOT_COMMANDS.length} commands with Telegram`);
+        } catch (cmdError: any) {
+            console.error("⚠️ Failed to register command menu:", cmdError.message);
+        }
+
         await sendMessage("<i>Bot started successfully in " + environment + " mode.</i>");
         await startScheduler();
 

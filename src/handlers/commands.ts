@@ -2,6 +2,7 @@ import { Context } from "telegraf";
 import { UserService } from "../services/UserService";
 import { ADMIN_USERNAME } from "../bot";
 import { Markup } from "telegraf";
+import { formatCommandList } from "../botCommands";
 
 export const userSessions = new Map<number, {
     step: string;
@@ -29,12 +30,7 @@ export async function handleStart(ctx: Context) {
         await ctx.reply(
             "👋 Welcome back to DESCO Balance Check Bot! 🔋\n\n" +
             "Available commands:\n" +
-            "/balance - Check your electricity balance\n" +
-            "/usage - Usage overview for the last N days\n" +
-            "/me - View your account information\n" +
-            "/update - Update your account details\n" +
-            "/subscribe - Enable/disable notifications\n" +
-            "/help - Show all commands"
+            formatCommandList(["start"])
         );
     }
 }
@@ -45,13 +41,7 @@ export async function handleHelp(ctx: Context) {
 
 <b>Available Commands:</b>
 
-/start - Set up your account (first time users)
-/balance - Check your current DESCO balance
-/usage - Usage overview for the last N days (consumption, averages, recharges)
-/me - View your account and subscription info
-/update - Update your account details
-/subscribe - Manage notification subscriptions
-/help - Show this help message
+${formatCommandList()}
 
 <b>About Subscriptions:</b>
 When subscribed, you'll receive automatic balance notifications at your chosen times. You can also set a low balance threshold for alerts.
