@@ -47,6 +47,38 @@ function withFreshness<T extends object>(result: T, ...sources: unknown[]): T {
     };
 }
 
+/** Bangla numerals to ASCII, so "০৯:০০" validates the same as "09:00". */
+function asciiDigits(text: string): string {
+    return text.replace(/[০-৯]/g, (digit) => String("০১২৩৪৫৬৭৮৯".indexOf(digit)));
+}
+
+/** Valid, de-duplicated, sorted 24-hour times, or null if any entry is malformed. */
+function parseTimes(input: unknown): string[] | null {
+    if (!Array.isArray(input) || input.length === 0 || input.length > 6) return null;
+
+    const times = new Set<string>();
+    for (const raw of input) {
+        const match = /^(\d{1,2}):(\d{2})$/.exec(asciiDigits(String(raw)).trim());
+        if (!match) return null;
+
+        const hour = Number(match[1]);
+        const minute = Number(match[2]);
+        if (hour > 23 || minute > 59) return null;
+
+        times.add(`${String(hour).padStart(2, "0")}:${match[2]}`);
+    }
+    return [...times].sort();
+}
+
+/**
+ * The scheduler is loaded only when a change needs it. Importing it at the top
+ * would pull the Telegram client into everything that touches the tools.
+ */
+async function applyScheduleChange() {
+    const { refreshSchedules } = await import("../scheduler");
+    await refreshSchedules();
+}
+
 /** No account saved means the DESCO tools cannot run; say so rather than failing. */
 function requireAccount(ctx: ToolContext): { accountNo?: string; meterNo?: string } | null {
     if (!ctx.accountNo && !ctx.meterNo) return null;
@@ -317,6 +349,159 @@ const TOOLS: Record<string, Tool> = {
                         "re-prices the month, so there may be small gaps between band ranges.",
                 };
             });
+        },
+    },
+
+    // ---- Changes to the caller's own settings ----
+    //
+    // None of these takes a user id. Each acts on ctx.userId, which comes from
+    // the Telegram update and not from anything the model or the user can
+    // supply, so there is no argument through which one user could reach
+    // another's settings, whatever the conversation says.
+
+    set_notification_times: {
+        minRole: "user",
+        declaration: {
+            name: "set_notification_times",
+            description:
+                "Replaces the current user's own daily balance-reminder times. Call only when the user clearly " +
+                "asks to change them. The list given becomes the full set, so to move one time keep the others.",
+            parameters: {
+                type: Type.OBJECT,
+                properties: {
+                    times: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                        description: "1 to 6 times in 24-hour HH:MM, Dhaka time, e.g. [\"09:00\", \"20:00\"].",
+                    },
+                },
+                required: ["times"],
+            },
+        },
+        handler: async (args, ctx) => {
+            const times = parseTimes(args?.times);
+            if (!times) return { error: "Times must be 1 to 6 entries in 24-hour HH:MM format, e.g. 09:00." };
+
+            const before = await UserService.getUser(ctx.userId);
+            if (!before) return { error: "User not found." };
+
+            await UserService.updateNotificationTimes(ctx.userId, times);
+            await applyScheduleChange();
+
+            return {
+                ok: true,
+                previousTimes: before.notificationTimes,
+                newTimes: times,
+                remindersActive: before.isSubscribed,
+                note: before.isSubscribed ? undefined : "Reminders are currently switched off, so these times take effect once the user subscribes.",
+            };
+        },
+    },
+
+    set_low_balance_threshold: {
+        minRole: "user",
+        declaration: {
+            name: "set_low_balance_threshold",
+            description:
+                "Sets the balance in BDT at or below which the current user gets a low-balance warning. " +
+                "Call only when the user clearly asks to change it.",
+            parameters: {
+                type: Type.OBJECT,
+                properties: { amountBDT: { type: Type.NUMBER, description: "Whole BDT amount, 0 to 100000." } },
+                required: ["amountBDT"],
+            },
+        },
+        handler: async (args, ctx) => {
+            const amount = Math.round(Number(args?.amountBDT));
+            if (!Number.isFinite(amount) || amount < 0 || amount > 100000) {
+                return { error: "The threshold must be a number between 0 and 100000 BDT." };
+            }
+
+            const before = await UserService.getUser(ctx.userId);
+            if (!before) return { error: "User not found." };
+
+            await UserService.updateThreshold(ctx.userId, amount);
+            return { ok: true, previousThresholdBDT: before.threshold, newThresholdBDT: amount };
+        },
+    },
+
+    set_days_left_warning: {
+        minRole: "user",
+        declaration: {
+            name: "set_days_left_warning",
+            description:
+                "Sets how many days of power left should trigger a warning for the current user. 0 switches " +
+                "the days-based warning off. Call only when the user clearly asks to change it.",
+            parameters: {
+                type: Type.OBJECT,
+                properties: { days: { type: Type.NUMBER, description: "Whole days, 0 to 60." } },
+                required: ["days"],
+            },
+        },
+        handler: async (args, ctx) => {
+            const days = Math.round(Number(args?.days));
+            if (!Number.isFinite(days) || days < 0 || days > 60) {
+                return { error: "Days must be a number between 0 and 60." };
+            }
+
+            const before = await UserService.getUser(ctx.userId);
+            if (!before) return { error: "User not found." };
+
+            await UserService.updateThresholdDays(ctx.userId, days);
+            return { ok: true, previousDays: before.thresholdDays, newDays: days };
+        },
+    },
+
+    set_reminders_enabled: {
+        minRole: "user",
+        declaration: {
+            name: "set_reminders_enabled",
+            description:
+                "Switches the current user's scheduled balance reminders on or off (subscribe / unsubscribe). " +
+                "Call only when the user clearly asks for it.",
+            parameters: {
+                type: Type.OBJECT,
+                properties: { enabled: { type: Type.BOOLEAN } },
+                required: ["enabled"],
+            },
+        },
+        handler: async (args, ctx) => {
+            if (typeof args?.enabled !== "boolean") return { error: "enabled must be true or false." };
+
+            const before = await UserService.getUser(ctx.userId);
+            if (!before) return { error: "User not found." };
+            if (args.enabled && !before.accountNo && !before.meterNo) {
+                return { error: "No DESCO account saved yet. Ask the user to run /start first." };
+            }
+
+            await UserService.updateSubscription(ctx.userId, args.enabled);
+            await applyScheduleChange();
+
+            return { ok: true, wasEnabled: before.isSubscribed, nowEnabled: args.enabled, times: before.notificationTimes };
+        },
+    },
+
+    set_low_balance_rechecks: {
+        minRole: "user",
+        declaration: {
+            name: "set_low_balance_rechecks",
+            description:
+                "Switches on or off the hourly re-check that alerts the current user once per new reading " +
+                "while their balance is low. Call only when the user clearly asks for it.",
+            parameters: {
+                type: Type.OBJECT,
+                properties: { enabled: { type: Type.BOOLEAN } },
+                required: ["enabled"],
+            },
+        },
+        handler: async (args, ctx) => {
+            if (typeof args?.enabled !== "boolean") return { error: "enabled must be true or false." };
+
+            const before = await UserService.getUser(ctx.userId);
+            if (!before) return { error: "User not found." };
+
+            await UserService.updateHourlyNotification(ctx.userId, args.enabled);
+            return { ok: true, wasEnabled: before.hourlyNotificationEnabled, nowEnabled: args.enabled };
         },
     },
 
