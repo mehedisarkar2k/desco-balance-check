@@ -13,6 +13,7 @@ export const BOT_COMMANDS = [
     { command: "start", description: "Set up your DESCO account and get started" },
     { command: "balance", description: "Check your current prepaid electricity balance" },
     { command: "usage", description: "Usage overview for the last N days" },
+    { command: "recharges", description: "See your recharge history and what it credited" },
     { command: "me", description: "View your account details and subscription status" },
     { command: "update", description: "Update account info, notification times, or alerts" },
     { command: "subscribe", description: "Enable/disable automatic balance notifications" },

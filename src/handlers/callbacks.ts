@@ -1,7 +1,7 @@
 import { Context } from "telegraf";
 import { UserService } from "../services/UserService";
 import { userSessions } from "./commands";
-import { performBalanceCheck, performOverview } from "../utils/balanceChecker";
+import { performBalanceCheck, performOverview, performRechargeHistory } from "../utils/balanceChecker";
 import { refreshSchedules } from "../scheduler";
 import { MAX_OVERVIEW_DAYS } from "../utils/overview";
 
@@ -55,6 +55,21 @@ export async function handleCallbackQuery(ctx: Context) {
             ctx,
             { accountNo: user.accountNo, meterNo: user.meterNo },
             Number(choice)
+        );
+    } else if (data.startsWith("recharges_")) {
+        const days = Number(data.slice("recharges_".length));
+
+        const user = await UserService.getUser(userId);
+        if (!user || (!user.accountNo && !user.meterNo)) {
+            await ctx.reply("❌ No saved account details found. Please use /start to set up.");
+            return;
+        }
+
+        await ctx.reply("Loading your recharge history... ⏳");
+        await performRechargeHistory(
+            ctx,
+            { accountNo: user.accountNo, meterNo: user.meterNo },
+            days
         );
     } else if (data === "enter_custom") {
         userSessions.set(userId, { step: "waiting_for_account" });

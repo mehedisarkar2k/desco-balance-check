@@ -1,7 +1,12 @@
 import { Context } from "telegraf";
 import { sendMessage, ADMIN_CHAT_ID } from "../bot";
 import { getBalanceReport, formatBalanceMessage } from "./usage";
-import { getOverview, formatOverviewMessage } from "./overview";
+import {
+    getOverview,
+    formatOverviewMessage,
+    getRecharges,
+    formatRechargeHistoryMessage,
+} from "./overview";
 
 export async function performBalanceCheck(
     ctx: Context,
@@ -50,6 +55,26 @@ export async function performOverview(
     }
 
     await reportFailure(ctx, "Overview Fetch Failed", result.error, result.attemptedUrls);
+}
+
+export async function performRechargeHistory(
+    ctx: Context,
+    params: { accountNo?: string; meterNo?: string },
+    days: number
+) {
+    if (!params.accountNo && !params.meterNo) {
+        await ctx.reply("❌ Please provide either Account Number or Meter Number.");
+        return;
+    }
+
+    const result = await getRecharges(params, days);
+
+    if (result.success && result.recharges) {
+        await ctx.reply(formatRechargeHistoryMessage(result.recharges, days), { parse_mode: "HTML" });
+        return;
+    }
+
+    await reportFailure(ctx, "Recharge History Fetch Failed", result.error);
 }
 
 /** Tells the user something went wrong and forwards the detail to the admin. */

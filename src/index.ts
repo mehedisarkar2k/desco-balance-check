@@ -4,7 +4,7 @@ import { connectDatabase } from "./database";
 import { startHealthCheckServer } from "./health";
 import { startKeepAlive } from "./keepalive";
 import { autoRegisterMiddleware } from "./middleware/autoRegister";
-import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleSubscribe, handleUsage } from "./handlers/commands";
+import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleSubscribe, handleUsage, handleRecharges } from "./handlers/commands";
 import { handleCallbackQuery } from "./handlers/callbacks";
 import { handleTextMessage } from "./handlers/textMessages";
 import { startBotWithRetry } from "./utils/botLauncher";
@@ -36,6 +36,7 @@ bot.command("me", handleMe);
 bot.command("update", handleUpdate);
 bot.command("balance", handleBalance);
 bot.command("usage", handleUsage);
+bot.command("recharges", handleRecharges);
 bot.command("subscribe", handleSubscribe);
 
 // Register event handlers

@@ -166,6 +166,33 @@ export async function handleUsage(ctx: Context) {
     );
 }
 
+export async function handleRecharges(ctx: Context) {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const user = await UserService.getUser(userId);
+
+    if (!user || (!user.accountNo && !user.meterNo)) {
+        await ctx.reply("❌ Please set up your account using /start first.");
+        return;
+    }
+
+    await ctx.reply(
+        "💳 <b>Recharge History</b>\n\nWhich period would you like to see?",
+        {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+                [
+                    Markup.button.callback("30 days", "recharges_30"),
+                    Markup.button.callback("90 days", "recharges_90"),
+                    Markup.button.callback("1 year", "recharges_365"),
+                ],
+                [Markup.button.callback("❌ Cancel", "cancel")],
+            ]),
+        }
+    );
+}
+
 export async function handleSubscribe(ctx: Context) {
     const userId = ctx.from?.id;
     if (!userId) return;

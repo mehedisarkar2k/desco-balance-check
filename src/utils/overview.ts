@@ -14,6 +14,7 @@ import {
     summarizeUsage,
     formatDayMonth,
     USAGE_WINDOW_DAYS,
+    TARIFF_WINDOW_DAYS,
 } from "./usage";
 
 /** Bounds for the period the user may ask about. */
@@ -22,6 +23,13 @@ export const MAX_OVERVIEW_DAYS = 90;
 
 /** Recharges listed in the overview, newest first. */
 const MAX_RECHARGES_SHOWN = 5;
+
+/**
+ * Rows in the day-by-day table. DESCO only serves about 45 days of readings,
+ * so this is a guard against an unexpectedly long response rather than a limit
+ * users will normally meet.
+ */
+const MAX_DAILY_ROWS = 45;
 
 export interface PeriodSummary {
     fromDate: string;
@@ -35,6 +43,8 @@ export interface PeriodSummary {
     /** Busiest and quietest single day; null if every step spans a gap. */
     highest: DailyDelta | null;
     lowest: DailyDelta | null;
+    /** Per-day usage, oldest first, for the day-by-day table. */
+    entries: DailyDelta[];
 }
 
 export interface Overview {
@@ -58,7 +68,11 @@ export function summarizePeriod(deltas: DailyDelta[]): PeriodSummary | null {
     // A step covering several days would look like a spike next to single days,
     // so only true one-day steps are eligible for the high/low reading.
     const singleDays = deltas.filter((d) => d.spanDays === 1);
-    const byTaka = [...singleDays].sort((a, b) => a.taka - b.taka);
+
+    // Ranked by kWh, not cost. DESCO's tariff is banded, so the rate per unit
+    // climbs through the month and resets on the 1st; ranking by taka would
+    // report where the month's total had reached rather than the busiest day.
+    const byUsage = [...singleDays].sort((a, b) => a.kwh - b.kwh);
 
     return {
         fromDate: deltas[0].date,
@@ -68,8 +82,9 @@ export function summarizePeriod(deltas: DailyDelta[]): PeriodSummary | null {
         totalKwh,
         takaPerDay: totalTaka / days,
         kwhPerDay: totalKwh / days,
-        highest: byTaka.length > 0 ? byTaka[byTaka.length - 1] : null,
-        lowest: byTaka.length > 0 ? byTaka[0] : null,
+        highest: byUsage.length > 0 ? byUsage[byUsage.length - 1] : null,
+        lowest: byUsage.length > 0 ? byUsage[0] : null,
+        entries: deltas,
     };
 }
 
@@ -89,7 +104,12 @@ export async function getOverview(
 
     const readingTime = result.data.readingTime;
     // One extra day of history, since N daily figures need N+1 cumulative readings.
-    const { dateFrom, dateTo } = consumptionRange(readingTime, requestedDays + 1);
+    // Always reach back far enough for the tariff curve, even for a short report.
+    const { dateFrom, dateTo } = consumptionRange(
+        readingTime,
+        Math.max(requestedDays + 1, TARIFF_WINDOW_DAYS)
+    );
+    const periodStart = consumptionRange(readingTime, requestedDays + 1).dateFrom;
 
     let period: PeriodSummary | null = null;
     let usage: UsageSummary | null = null;
@@ -98,13 +118,20 @@ export async function getOverview(
     try {
         const rows = await fetchDailyConsumption(params, dateFrom, dateTo, result.prefix);
         if (rows) {
-            period = summarizePeriod(dailyDeltas(rows));
+            // The report covers the requested period; the curve uses everything.
+            const periodRows = rows.filter((row) => row.date >= periodStart);
+            period = summarizePeriod(dailyDeltas(periodRows.length >= 2 ? periodRows : rows));
 
             // The runway always uses the standard window, so a 30-day overview
             // does not report a different "days left" than /balance does.
             const windowStart = consumptionRange(readingTime, USAGE_WINDOW_DAYS + 1).dateFrom;
             const recent = rows.filter((row) => row.date >= windowStart);
-            usage = summarizeUsage(recent.length >= 2 ? recent : rows, result.data.balance, readingTime);
+            usage = summarizeUsage(
+                recent.length >= 2 ? recent : rows,
+                result.data.balance,
+                readingTime,
+                rows
+            );
         }
     } catch (error: any) {
         console.error("Overview: failed to load daily consumption:", error.message);
@@ -120,6 +147,101 @@ export async function getOverview(
         success: true,
         overview: { requestedDays, balance: result.data, usage, period, recharges },
     };
+}
+
+/**
+ * Day-by-day table inside a <pre> block so the columns align in Telegram.
+ * A step covering a gap is marked, since its figure is the total for several
+ * days rather than for the one date shown.
+ */
+function formatDailyTable(entries: DailyDelta[]): string[] {
+    if (entries.length === 0) return [];
+
+    const rows = entries.slice(-MAX_DAILY_ROWS);
+    const hasGap = rows.some((row) => row.spanDays > 1);
+
+    const body = rows.map((row) => {
+        const label = formatDayMonth(new Date(Date.parse(row.date)))
+            + (row.spanDays > 1 ? ` *${row.spanDays}d` : "");
+        return `${label.padEnd(11)}${row.kwh.toFixed(2).padStart(6)}${row.taka.toFixed(2).padStart(9)}`;
+    });
+
+    const lines = [
+        "",
+        "📅 <b>Day by day:</b>",
+        `<pre>${["Date          kWh      BDT", ...body].join("\n")}</pre>`,
+    ];
+
+    if (entries.length > rows.length) {
+        lines.push(`<i>Showing the most recent ${rows.length} of ${entries.length} days.</i>`);
+    }
+    if (hasGap) {
+        lines.push("<i>* DESCO skipped a reading; that row covers several days.</i>");
+    }
+
+    return lines;
+}
+
+/**
+ * Recharges for a period on their own, with the split between energy credit
+ * and charges spelled out. The first recharge of a month carries that month's
+ * demand charge, so two equal payments can credit very different amounts.
+ */
+export async function getRecharges(
+    params: FetchBalanceParams,
+    requestedDays: number
+): Promise<{ success: boolean; recharges?: RechargeRecord[]; error?: string }> {
+    const result = await fetchBalance(params);
+
+    if (!result.success || !result.data) {
+        return { success: false, error: result.error };
+    }
+
+    const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, requestedDays);
+    const recharges = await fetchRechargeHistory(params, dateFrom, dateTo, result.prefix);
+
+    if (recharges === null) {
+        return { success: false, error: "Could not load recharge history from DESCO" };
+    }
+
+    return { success: true, recharges };
+}
+
+export function formatRechargeHistoryMessage(
+    recharges: RechargeRecord[],
+    requestedDays: number
+): string {
+    const lines = [`<b>💳 Recharge History — Last ${requestedDays} days</b>`];
+
+    if (recharges.length === 0) {
+        lines.push("", "<i>No recharges found in this period.</i>");
+        return lines.join("\n");
+    }
+
+    const total = recharges.reduce((sum, r) => sum + r.totalAmount, 0);
+    const energy = recharges.reduce((sum, r) => sum + r.energyAmount, 0);
+    const charges = recharges.reduce((sum, r) => sum + r.chargeAmount, 0);
+
+    lines.push(
+        "",
+        `<b>Paid:</b> <code>${total.toFixed(2)} BDT</code> across ${recharges.length} recharge${recharges.length === 1 ? "" : "s"}`,
+        `⚡ <b>Became energy:</b> <code>${energy.toFixed(2)} BDT</code>`,
+        `🧾 <b>Charges &amp; VAT:</b> <code>${charges.toFixed(2)} BDT</code> (${((charges / total) * 100).toFixed(1)}%)`,
+        ""
+    );
+
+    for (const r of recharges) {
+        const date = formatDayMonth(new Date(Date.parse(r.rechargeDate.slice(0, 10))));
+        const ok = /success/i.test(r.orderStatus);
+
+        lines.push(
+            `${ok ? "•" : "⚠️"} <b>${date}</b> — <code>${r.totalAmount.toFixed(2)} BDT</code>`,
+            `   energy <code>${r.energyAmount.toFixed(2)}</code> · charges <code>${r.chargeAmount.toFixed(2)}</code>`,
+            `   via ${r.rechargeOperator}${ok ? "" : ` · <b>${r.orderStatus}</b>`}`
+        );
+    }
+
+    return lines.join("\n");
 }
 
 function formatRechargeLine(recharge: RechargeRecord): string {
@@ -154,10 +276,12 @@ export function formatOverviewMessage(overview: Overview): string {
 
         if (period.highest && period.lowest && period.highest.date !== period.lowest.date) {
             lines.push(
-                `🔺 <b>Highest:</b> <code>${period.highest.taka.toFixed(2)} BDT</code> on ${formatDayMonth(new Date(Date.parse(period.highest.date)))}`,
-                `🔻 <b>Lowest:</b> <code>${period.lowest.taka.toFixed(2)} BDT</code> on ${formatDayMonth(new Date(Date.parse(period.lowest.date)))}`
+                `🔺 <b>Busiest:</b> <code>${period.highest.kwh.toFixed(2)} kWh</code> on ${formatDayMonth(new Date(Date.parse(period.highest.date)))}`,
+                `🔻 <b>Quietest:</b> <code>${period.lowest.kwh.toFixed(2)} kWh</code> on ${formatDayMonth(new Date(Date.parse(period.lowest.date)))}`
             );
         }
+
+        lines.push(...formatDailyTable(period.entries));
     } else {
         lines.push("", "<i>No consumption readings available for this range.</i>");
     }

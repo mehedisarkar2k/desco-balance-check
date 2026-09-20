@@ -5,12 +5,20 @@ import {
     fetchBalance,
     fetchDailyConsumption,
 } from "../desco";
+import { projectRunway, monthToDateUnits } from "../domain/runway";
 
 /**
  * Days of history used for the burn-rate average. Fixed, so the runway shown by
  * /balance and by any /usage period agree with each other.
  */
 export const USAGE_WINDOW_DAYS = 14;
+
+/**
+ * History fetched to build the tariff curve. Wide enough to always include a
+ * reading from the previous month, which is the baseline month-to-date
+ * consumption is measured against.
+ */
+export const TARIFF_WINDOW_DAYS = 40;
 
 export interface UsageSummary {
     takaPerDay: number;
@@ -19,6 +27,8 @@ export interface UsageSummary {
     runoutDate: Date;
     /** Days actually covered by the sample, which may be less than requested. */
     sampleDays: number;
+    /** True when the runway was priced against the tariff, not a flat average. */
+    tariffAware: boolean;
 }
 
 const DAY_MS = 86_400_000;
@@ -88,13 +98,22 @@ export function dailyDeltas(rows: DailyConsumption[]): DailyDelta[] {
     return deltas;
 }
 
-/** Average burn rate and runway from the daily series. */
+/**
+ * Average burn rate and runway from the daily series.
+ *
+ * `rateRows` sets the averaging window; `allRows` may reach further back so the
+ * tariff curve can find a previous-month baseline. When that curve is
+ * available the runway is projected against the tariff, which matters because
+ * a flat average taken late in a month assumes the expensive band continues
+ * past the 1st and reports a shorter runway than the customer really has.
+ */
 export function summarizeUsage(
-    rows: DailyConsumption[],
+    rateRows: DailyConsumption[],
     balance: number,
-    readingTime: string
+    readingTime: string,
+    allRows: DailyConsumption[] = rateRows
 ): UsageSummary | null {
-    const deltas = dailyDeltas(rows);
+    const deltas = dailyDeltas(rateRows);
     if (deltas.length === 0) return null;
 
     const taka = deltas.reduce((sum, d) => sum + d.taka, 0);
@@ -104,14 +123,33 @@ export function summarizeUsage(
     if (days <= 0 || taka <= 0) return null;
 
     const takaPerDay = taka / days;
-    const daysRemaining = Math.max(0, balance / takaPerDay);
+    const kwhPerDay = kwh / days;
 
+    const monthUnits = monthToDateUnits(allRows, readingTime);
+    const runway = monthUnits === null
+        ? null
+        : projectRunway(allRows, balance, readingTime, kwhPerDay, monthUnits);
+
+    if (runway) {
+        return {
+            takaPerDay,
+            kwhPerDay,
+            daysRemaining: runway.days,
+            runoutDate: runway.runoutDate,
+            sampleDays: days,
+            tariffAware: true,
+        };
+    }
+
+    // No usable tariff curve: fall back to a flat average.
+    const daysRemaining = Math.max(0, balance / takaPerDay);
     return {
         takaPerDay,
-        kwhPerDay: kwh / days,
+        kwhPerDay,
         daysRemaining,
         runoutDate: new Date(Date.parse(readingTime) + daysRemaining * DAY_MS),
         sampleDays: days,
+        tariffAware: false,
     };
 }
 
@@ -141,13 +179,20 @@ export async function getBalanceReport(params: FetchBalanceParams): Promise<{
         };
     }
 
-    const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, USAGE_WINDOW_DAYS);
+    const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, TARIFF_WINDOW_DAYS);
 
     let usage: UsageSummary | null = null;
     try {
         const rows = await fetchDailyConsumption(params, dateFrom, dateTo, result.prefix);
         if (rows) {
-            usage = summarizeUsage(rows, result.data.balance, result.data.readingTime);
+            const rateStart = consumptionRange(result.data.readingTime, USAGE_WINDOW_DAYS + 1).dateFrom;
+            const rateRows = rows.filter((row) => row.date >= rateStart);
+            usage = summarizeUsage(
+                rateRows.length >= 2 ? rateRows : rows,
+                result.data.balance,
+                result.data.readingTime,
+                rows
+            );
         }
     } catch (error: any) {
         console.error("Failed to derive usage summary:", error.message);
