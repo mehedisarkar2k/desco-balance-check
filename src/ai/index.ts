@@ -4,8 +4,25 @@ import { ADMIN_CHAT_ID } from "../bot";
 import { getSession, resetSession } from "./session";
 import { askGemini, isAiConfigured } from "./gemini";
 import { Role } from "./tools";
+import { sanitizeTelegramHtml, stripTelegramHtml } from "./telegramHtml";
 
 export { isAiConfigured, resetSession };
+
+/**
+ * Sends a model reply, falling back to plain text if Telegram still refuses
+ * the markup. Losing an answer the model already produced -- and the DESCO
+ * calls behind it -- over a formatting fault is the worse outcome.
+ */
+async function replySafely(ctx: Context, text: string) {
+    try {
+        await ctx.reply(sanitizeTelegramHtml(text), { parse_mode: "HTML" });
+    } catch (error: any) {
+        if (!/parse entities|can't parse/i.test(error?.message ?? "")) throw error;
+
+        console.warn("Telegram rejected sanitized HTML, retrying as plain text:", error.message);
+        await ctx.reply(stripTelegramHtml(text));
+    }
+}
 
 function escapeHtml(text: string): string {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -48,7 +65,7 @@ export async function handleAiMessage(ctx: Context, text: string) {
             `tools=[${reply.toolsUsed.join(", ")}] descoCalls=${reply.apiCalls}`
         );
 
-        await ctx.reply(reply.text, { parse_mode: "HTML" });
+        await replySafely(ctx, reply.text);
     } catch (error: any) {
         console.error(`AI failed for ${userId}:`, error?.stack || error?.message || error);
 
