@@ -11,6 +11,17 @@ export interface Release {
 }
 
 export const CHANGELOG: Record<string, Release> = {
+    "2.0.0": {
+        title: "See exactly what you pay per unit",
+        notes: [
+            "📊 <b>New Tariff column</b> in /usage — every day now shows what you paid <i>per unit</i>, not just the total. Watch the rate climb through the month and drop back on the 1st:",
+            "   <code>31 Aug  10.02 kWh  91.18 BDT  9.10</code>",
+            "   <code> 1 Sept  7.44 kWh  34.45 BDT  4.63</code>",
+            "⚡ <b>Far more reliable.</b> /usage and /recharges used to fail completely whenever DESCO was slow, even when the data they needed was fine. Each part now loads on its own and retries, so you get whatever DESCO could give instead of an error.",
+            "⏳ <b>Days-left is labelled as a forecast</b> — it prices your recent usage against the slab rates, including the reset on the 1st, but it is an estimate and will move if your usage does.",
+            "💬 Ask <i>\"slab breakdown dao\"</i> to see which band you are in and the dates your rate changed.",
+        ],
+    },
     "1.2.0": {
         title: "Chat that works, and your tariff explained",
         notes: [

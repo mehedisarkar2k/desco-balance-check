@@ -41,6 +41,18 @@ function toDateString(date: Date): string {
     return date.toISOString().slice(0, 10);
 }
 
+/**
+ * Today in the billing timezone, as YYYY-MM-DD.
+ *
+ * A date anchor that does not require calling DESCO first, so a lookup needing
+ * only a date range is not taken down by an unrelated endpoint being slow.
+ */
+export function todayInBillingZone(): string {
+    return new Date().toLocaleDateString("en-CA", {
+        timeZone: process.env.TZ || "Asia/Dhaka",
+    });
+}
+
 /** Date range ending the day before `readingTime`, covering `days` days. */
 export function consumptionRange(readingTime: string, days: number): { dateFrom: string; dateTo: string } {
     const end = Date.parse(readingTime);

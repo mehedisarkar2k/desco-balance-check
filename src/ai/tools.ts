@@ -4,7 +4,7 @@ import { UserService } from "../services/UserService";
 import { User } from "../models/User";
 import { fetchCustomerInfo, fetchMonthlyConsumption, fetchDailyConsumption } from "../desco";
 import { buildMonthCurves, describeTariff } from "../domain/tariff";
-import { consumptionRange, TARIFF_WINDOW_DAYS } from "../utils/usage";
+import { consumptionRange, TARIFF_WINDOW_DAYS, todayInBillingZone } from "../utils/usage";
 import { getBalanceReport } from "../utils/usage";
 import { getOverview, getRecharges } from "../utils/overview";
 import { Session, cached } from "./session";
@@ -260,17 +260,19 @@ const TOOLS: Record<string, Tool> = {
             if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
 
             return await cached(ctx.session, "tariff", async () => {
-                const balance = await getBalanceReport(params);
-                if (!balance.success || !balance.report) {
-                    return { error: balance.error ?? "Could not reach DESCO" };
-                }
-
-                const readingTime = balance.report.data.readingTime;
-                const { dateFrom, dateTo } = consumptionRange(readingTime, TARIFF_WINDOW_DAYS);
+                // The bands come entirely from the consumption readings, so the
+                // balance is not consulted. Fetching it first only to read its
+                // date meant a slow getBalance took this down with it, even
+                // though the readings it needs were served fine.
+                const { dateFrom, dateTo } = consumptionRange(todayInBillingZone(), TARIFF_WINDOW_DAYS);
                 const rows = await fetchDailyConsumption(params, dateFrom, dateTo);
                 if (!rows) return { error: "Could not load consumption readings from DESCO." };
 
-                const curve = buildMonthCurves(rows).find((c) => c.month === readingTime.slice(0, 7));
+                // The newest month that has a previous-month baseline. Matching
+                // on today's month would find nothing on the 1st, before any
+                // reading for the new month has been published.
+                const curves = buildMonthCurves(rows);
+                const curve = curves[curves.length - 1];
                 if (!curve) {
                     return { error: "Not enough readings yet this month to work out the rate bands." };
                 }

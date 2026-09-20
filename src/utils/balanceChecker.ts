@@ -92,15 +92,19 @@ async function reportFailure(
         "This issue has been reported to support. Please wait while we investigate."
     );
 
+    // Only shown when there is something to show. A bare "No URLs attempted"
+    // reads like the bot never tried, when the caller simply does not collect
+    // URLs, and that sent the last investigation down the wrong path.
+    const urlSection = attemptedUrls?.length
+        ? `\n\n<b>Attempted URLs:</b>\n${attemptedUrls.map((url, i) => `${i + 1}. <code>${url}</code>`).join("\n")}`
+        : "";
+
     const errorMessage = `
 🚨 <b>${title}</b>
 
 <b>User:</b> ${ctx.from?.first_name || "Unknown"} (@${ctx.from?.username || "no username"})
 <b>User ID:</b> ${ctx.from?.id}
-<b>Error:</b> ${errorMsg}
-
-<b>Attempted URLs:</b>
-${attemptedUrls?.map((url, i) => `${i + 1}. <code>${url}</code>`).join('\n') || 'No URLs attempted'}
+<b>Error:</b> ${errorMsg}${urlSection}
 `;
     await sendMessage(errorMessage, ADMIN_CHAT_ID);
 }

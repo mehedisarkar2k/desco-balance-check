@@ -14,6 +14,7 @@ import {
     summarizeUsage,
     formatDayMonth,
     forecastNote,
+    todayInBillingZone,
     USAGE_WINDOW_DAYS,
     TARIFF_WINDOW_DAYS,
 } from "./usage";
@@ -50,7 +51,8 @@ export interface PeriodSummary {
 
 export interface Overview {
     requestedDays: number;
-    balance: DescoResponse;
+    /** Null when DESCO would not serve the balance; the rest of the report still stands. */
+    balance: DescoResponse | null;
     usage: UsageSummary | null;
     period: PeriodSummary | null;
     /** Null when the lookup failed, empty when there were simply no recharges. */
@@ -97,56 +99,71 @@ export async function getOverview(
     params: FetchBalanceParams,
     requestedDays: number
 ): Promise<{ success: boolean; overview?: Overview; error?: string; attemptedUrls?: string[] }> {
-    const result = await fetchBalance(params);
-
-    if (!result.success || !result.data) {
-        return { success: false, error: result.error, attemptedUrls: result.attemptedUrls };
-    }
-
-    const readingTime = result.data.readingTime;
-    // One extra day of history, since N daily figures need N+1 cumulative readings.
-    // Always reach back far enough for the tariff curve, even for a short report.
+    // Anchored to today, so the date range does not depend on getBalance
+    // answering first. One extra day of history, since N daily figures need
+    // N+1 cumulative readings, and always far enough back for the tariff curve.
+    const anchor = todayInBillingZone();
     const { dateFrom, dateTo } = consumptionRange(
-        readingTime,
+        anchor,
         Math.max(requestedDays + 1, TARIFF_WINDOW_DAYS)
     );
-    const periodStart = consumptionRange(readingTime, requestedDays + 1).dateFrom;
+    const periodStart = consumptionRange(anchor, requestedDays + 1).dateFrom;
+
+    // Issued together rather than in sequence. These are independent endpoints,
+    // and running them in series meant one slow call delayed the rest and a
+    // single failure took down parts of the report that had nothing to do with
+    // it. Each is allowed to fail on its own.
+    const [balanceResult, rows, recharges] = await Promise.all([
+        fetchBalance(params).catch((error: any) => {
+            console.error("Overview: balance lookup failed:", error.message);
+            return null;
+        }),
+        fetchDailyConsumption(params, dateFrom, dateTo).catch((error: any) => {
+            console.error("Overview: daily consumption failed:", error.message);
+            return null;
+        }),
+        fetchRechargeHistory(params, dateFrom, dateTo).catch((error: any) => {
+            console.error("Overview: recharge history failed:", error.message);
+            return null;
+        }),
+    ]);
+
+    const balance = balanceResult?.success ? balanceResult.data ?? null : null;
+
+    // Nothing usable came back at all, so there is no report to show.
+    if (!balance && !rows) {
+        return {
+            success: false,
+            error: balanceResult?.error ?? "DESCO did not respond (it may be slow or unavailable right now)",
+            attemptedUrls: balanceResult?.attemptedUrls,
+        };
+    }
 
     let period: PeriodSummary | null = null;
     let usage: UsageSummary | null = null;
-    let recharges: RechargeRecord[] | null = null;
 
-    try {
-        const rows = await fetchDailyConsumption(params, dateFrom, dateTo, result.prefix);
-        if (rows) {
-            // The report covers the requested period; the curve uses everything.
-            const periodRows = rows.filter((row) => row.date >= periodStart);
-            period = summarizePeriod(dailyDeltas(periodRows.length >= 2 ? periodRows : rows));
+    if (rows) {
+        // The report covers the requested period; the curve uses everything.
+        const periodRows = rows.filter((row) => row.date >= periodStart);
+        period = summarizePeriod(dailyDeltas(periodRows.length >= 2 ? periodRows : rows));
 
-            // The runway always uses the standard window, so a 30-day overview
-            // does not report a different "days left" than /balance does.
-            const windowStart = consumptionRange(readingTime, USAGE_WINDOW_DAYS + 1).dateFrom;
+        // The runway needs a balance to spend down, so it is only produced when
+        // the balance came back. The usage table stands on its own without it.
+        if (balance) {
+            const windowStart = consumptionRange(balance.readingTime, USAGE_WINDOW_DAYS + 1).dateFrom;
             const recent = rows.filter((row) => row.date >= windowStart);
             usage = summarizeUsage(
                 recent.length >= 2 ? recent : rows,
-                result.data.balance,
-                readingTime,
+                balance.balance,
+                balance.readingTime,
                 rows
             );
         }
-    } catch (error: any) {
-        console.error("Overview: failed to load daily consumption:", error.message);
-    }
-
-    try {
-        recharges = await fetchRechargeHistory(params, dateFrom, dateTo, result.prefix);
-    } catch (error: any) {
-        console.error("Overview: failed to load recharge history:", error.message);
     }
 
     return {
         success: true,
-        overview: { requestedDays, balance: result.data, usage, period, recharges },
+        overview: { requestedDays, balance, usage, period, recharges },
     };
 }
 
@@ -164,13 +181,18 @@ function formatDailyTable(entries: DailyDelta[]): string[] {
     const body = rows.map((row) => {
         const label = formatDayMonth(new Date(Date.parse(row.date)))
             + (row.spanDays > 1 ? ` *${row.spanDays}d` : "");
-        return `${label.padEnd(11)}${row.kwh.toFixed(2).padStart(6)}${row.taka.toFixed(2).padStart(9)}`;
+        // Cost per unit for the day. This is where the banded tariff becomes
+        // visible: the same kWh costs far more late in a month than early,
+        // which the kWh and BDT columns alone do not reveal.
+        const rate = row.kwh > 0 ? (row.taka / row.kwh).toFixed(2) : "—";
+        return `${label.padEnd(10)}${row.kwh.toFixed(2).padStart(6)}${row.taka.toFixed(2).padStart(8)}${rate.padStart(7)}`;
     });
 
     const lines = [
         "",
         "📅 <b>Day by day:</b>",
-        `<pre>${["Date          kWh      BDT", ...body].join("\n")}</pre>`,
+        `<pre>${["Date         kWh     BDT   Tariff", ...body].join("\n")}</pre>`,
+        "<i>Tariff = BDT per kWh that day. It climbs through the month and resets on the 1st.</i>",
     ];
 
     if (entries.length > rows.length) {
@@ -192,21 +214,25 @@ export async function getRecharges(
     params: FetchBalanceParams,
     requestedDays: number
 ): Promise<{ success: boolean; recharges?: RechargeRecord[]; error?: string }> {
-    const result = await fetchBalance(params);
-
-    if (!result.success || !result.data) {
-        return { success: false, error: result.error };
-    }
-
-    const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, requestedDays);
-    const recharges = await fetchRechargeHistory(params, dateFrom, dateTo, result.prefix);
+    // Anchored to today rather than to a meter reading date. This previously
+    // called getBalance purely to borrow its readingTime, which tied recharge
+    // history to an unrelated endpoint: when getBalance was slow, /recharges
+    // spent the whole timeout budget failing without ever asking DESCO for a
+    // single recharge. Recharges are timestamped payments, not meter readings,
+    // so today's date is the correct anchor anyway.
+    const { dateFrom, dateTo } = consumptionRange(todayInBillingZone(), requestedDays);
+    const recharges = await fetchRechargeHistory(params, dateFrom, dateTo);
 
     if (recharges === null) {
-        return { success: false, error: "Could not load recharge history from DESCO" };
+        return {
+            success: false,
+            error: "DESCO did not return recharge history (it may be slow or unavailable right now)",
+        };
     }
 
     return { success: true, recharges };
 }
+
 
 export function formatRechargeHistoryMessage(
     recharges: RechargeRecord[],
@@ -287,7 +313,11 @@ export function formatOverviewMessage(overview: Overview): string {
         lines.push("", "<i>No consumption readings available for this range.</i>");
     }
 
-    lines.push("", `💰 <b>Balance:</b> <code>${balance.balance.toFixed(2)} BDT</code>`);
+    if (balance) {
+        lines.push("", `💰 <b>Balance:</b> <code>${balance.balance.toFixed(2)} BDT</code>`);
+    } else {
+        lines.push("", "<i>💰 Balance unavailable right now — DESCO did not answer. The usage above is still accurate.</i>");
+    }
 
     if (usage) {
         const days = Math.floor(usage.daysRemaining);
@@ -296,7 +326,9 @@ export function formatOverviewMessage(overview: Overview): string {
         );
     }
 
-    lines.push(`⚡ <b>This month:</b> <code>${balance.currentMonthTaka.toFixed(2)} BDT</code>`);
+    if (balance) {
+        lines.push(`⚡ <b>This month:</b> <code>${balance.currentMonthTaka.toFixed(2)} BDT</code>`);
+    }
 
     if (recharges === null) {
         lines.push("", "<i>Recharge history unavailable right now.</i>");
@@ -317,7 +349,9 @@ export function formatOverviewMessage(overview: Overview): string {
         }
     }
 
-    lines.push("", `📅 <b>Reading:</b> <code>${balance.readingTime}</code>`);
+    if (balance) {
+        lines.push("", `📅 <b>Reading:</b> <code>${balance.readingTime}</code>`);
+    }
 
     if (usage) {
         lines.push("", forecastNote(usage));
