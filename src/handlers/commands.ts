@@ -66,9 +66,15 @@ export async function handleMe(ctx: Context) {
         ? user.notificationTimes.join(", ")
         : "Not set";
     const hourlyStatus = user.hourlyNotificationEnabled ? "✅ Enabled" : "❌ Disabled";
-    const daysWarning = user.thresholdDays && user.thresholdDays > 0
-        ? `${user.thresholdDays} day(s) left`
-        : "Disabled";
+
+    // Phrased as conditions rather than values: "3 days" on its own reads like
+    // a live reading of what is left, when it is the point an alert fires.
+    const alertConditions = [`  • Balance drops to <b>${user.threshold} BDT</b>`];
+    if (user.thresholdDays && user.thresholdDays > 0) {
+        alertConditions.push(
+            `  • or about <b>${user.thresholdDays} day(s)</b> of power remain`
+        );
+    }
 
     const infoText = `
 👤 <b>Your Account Information</b>
@@ -83,12 +89,14 @@ export async function handleMe(ctx: Context) {
 
 🔔 <b>Subscription:</b> ${subscriptionStatus}
 <b>Notification Times:</b> ${notificationTimes}
-<b>Low Balance Threshold:</b> ${user.threshold} BDT
-<b>Days-Left Warning:</b> ${daysWarning}
-<b>Alerts When Low:</b> ${hourlyStatus}
 
+⚠️ <b>Warn me when${alertConditions.length > 1 ? " either" : ""}:</b>
+${alertConditions.join("\n")}
+
+<b>Keep checking while low:</b> ${hourlyStatus}
+
+<i>Use /balance to see how many days you actually have left</i>
 <i>Use /update to modify your details</i>
-<i>Use /subscribe to manage notifications</i>
 `;
     await ctx.reply(infoText, { parse_mode: "HTML" });
 }
