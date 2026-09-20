@@ -39,7 +39,6 @@ const TOOLS: Record<string, Tool> = {
             description:
                 "Current DESCO prepaid balance for the user, with how many days of power it is expected to last, " +
                 "the expected run-out date, and average daily consumption in kWh and BDT.",
-            parameters: { type: Type.OBJECT, properties: {} },
         },
         handler: async (_args, ctx) => {
             const params = requireAccount(ctx);
@@ -207,7 +206,6 @@ const TOOLS: Record<string, Tool> = {
             description:
                 "The registered DESCO account details: customer name, address, tariff category, " +
                 "sanctioned load, feeder and meter model.",
-            parameters: { type: Type.OBJECT, properties: {} },
         },
         handler: async (_args, ctx) => {
             const params = requireAccount(ctx);
@@ -227,7 +225,6 @@ const TOOLS: Record<string, Tool> = {
             description:
                 "The user's own bot settings: notification times, subscription status, and the thresholds " +
                 "at which low balance alerts fire.",
-            parameters: { type: Type.OBJECT, properties: {} },
         },
         handler: async (_args, ctx) => {
             const user = await UserService.getUser(ctx.userId);
@@ -290,7 +287,6 @@ const TOOLS: Record<string, Tool> = {
             description:
                 "ADMIN ONLY. Aggregate figures about the bot: total users, how many are subscribed, " +
                 "how many configured an account, how many blocked the bot, and active chat sessions.",
-            parameters: { type: Type.OBJECT, properties: {} },
         },
         handler: async () => ({
             totalUsers: await User.countDocuments(),

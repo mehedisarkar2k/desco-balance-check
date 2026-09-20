@@ -7,6 +7,10 @@ import { Role } from "./tools";
 
 export { isAiConfigured, resetSession };
 
+function escapeHtml(text: string): string {
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 /**
  * The admin is identified by chat id rather than anything the user can set,
  * so no profile field or message content can grant it.
@@ -46,7 +50,19 @@ export async function handleAiMessage(ctx: Context, text: string) {
 
         await ctx.reply(reply.text, { parse_mode: "HTML" });
     } catch (error: any) {
-        console.error(`AI failed for ${userId}:`, error.message);
+        console.error(`AI failed for ${userId}:`, error?.stack || error?.message || error);
+
+        // The admin gets the real error. Debugging this blind means guessing at
+        // which of the API key, model name or request shape was rejected.
+        if (roleFor(userId) === "admin") {
+            const detail = String(error?.message || error).slice(0, 600);
+            await ctx.reply(
+                `🤖 <b>AI request failed</b>\n\n<code>${escapeHtml(detail)}</code>`,
+                { parse_mode: "HTML" }
+            );
+            return;
+        }
+
         await ctx.reply(
             "🤖 Sorry, I couldn't answer that just now. You can still use /balance, /usage or /recharges."
         );
