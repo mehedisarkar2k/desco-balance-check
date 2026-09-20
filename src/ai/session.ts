@@ -7,7 +7,7 @@ import type { Content } from "@google/genai";
 export const SESSION_IDLE_MS = 30 * 60 * 1000;
 
 /** Turns kept for context. Older turns are dropped to bound prompt size. */
-const MAX_HISTORY_TURNS = 20;
+const MAX_HISTORY_TURNS = 12;
 
 export interface Session {
     userId: number;
@@ -58,9 +58,14 @@ export function getSession(userId: number): { session: Session; isNew: boolean }
     return { session, isNew: true };
 }
 
-/** A tool result that represents a failure rather than data. */
+/**
+ * A tool result that should not be kept for the session: a failure, or a saved
+ * copy served because DESCO was down. Either would otherwise be replayed for
+ * the rest of the chat after DESCO had recovered.
+ */
 function isFailure(value: unknown): boolean {
-    return Boolean(value && typeof value === "object" && "error" in (value as object));
+    if (!value || typeof value !== "object") return false;
+    return "error" in (value as object) || "savedCopy" in (value as object);
 }
 
 /**
@@ -92,11 +97,23 @@ export async function cached<T>(
     return value;
 }
 
+/** A message the user typed, as opposed to a tool result sent in the user role. */
+function isUserText(content: Content): boolean {
+    return content.role === "user" && Boolean(content.parts?.some((part) => typeof part.text === "string"));
+}
+
 export function appendHistory(session: Session, entries: Content[]) {
     session.history.push(...entries);
 
-    if (session.history.length > MAX_HISTORY_TURNS * 2) {
-        session.history = session.history.slice(-MAX_HISTORY_TURNS * 2);
+    // History now includes tool calls and their results, and the API rejects a
+    // tool result whose call is missing. So old turns are dropped whole, by
+    // cutting only at a message the user typed, never mid-turn.
+    const turnStarts = session.history
+        .map((content, index) => (isUserText(content) ? index : -1))
+        .filter((index) => index >= 0);
+
+    if (turnStarts.length > MAX_HISTORY_TURNS) {
+        session.history = session.history.slice(turnStarts[turnStarts.length - MAX_HISTORY_TURNS]);
     }
 }
 

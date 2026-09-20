@@ -6,6 +6,7 @@ import {
     fetchDailyConsumption,
 } from "../desco";
 import { projectRunway, monthToDateUnits } from "../domain/runway";
+import { staleAsOf } from "../descoStore";
 
 /**
  * Days of history used for the burn-rate average. Fixed, so the runway shown by
@@ -256,7 +257,34 @@ export function formatBalanceMessage(
         lines.push("", forecastNote(usage));
     }
 
+    const stale = staleNote(data);
+    if (stale) {
+        lines.push("", stale);
+    }
+
     return lines.join("\n");
+}
+
+/**
+ * A line telling the user they are looking at a saved copy, or null when the
+ * data is live. Showing saved figures without saying so would pass off an old
+ * balance as the current one.
+ */
+export function staleNote(...sources: unknown[]): string | null {
+    const times = sources.map(staleAsOf).filter((t): t is Date => Boolean(t));
+    if (times.length === 0) return null;
+
+    const oldest = new Date(Math.min(...times.map((t) => new Date(t).getTime())));
+    const when = oldest.toLocaleString("en-GB", {
+        day: "numeric",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: process.env.TZ || "Asia/Dhaka",
+    });
+
+    return `<i>⚠️ DESCO is not responding right now, so this is the saved data from ${when}. ` +
+        `It will refresh by itself once DESCO is back.</i>`;
 }
 
 /**

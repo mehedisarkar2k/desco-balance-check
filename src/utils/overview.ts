@@ -15,6 +15,7 @@ import {
     formatDayMonth,
     forecastNote,
     todayInBillingZone,
+    staleNote,
     USAGE_WINDOW_DAYS,
     TARIFF_WINDOW_DAYS,
 } from "./usage";
@@ -57,6 +58,8 @@ export interface Overview {
     period: PeriodSummary | null;
     /** Null when the lookup failed, empty when there were simply no recharges. */
     recharges: RechargeRecord[] | null;
+    /** Set when any part is a saved copy because DESCO did not answer. */
+    staleLine?: string | null;
 }
 
 export function summarizePeriod(deltas: DailyDelta[]): PeriodSummary | null {
@@ -163,7 +166,10 @@ export async function getOverview(
 
     return {
         success: true,
-        overview: { requestedDays, balance, usage, period, recharges },
+        overview: {
+            requestedDays, balance, usage, period, recharges,
+            staleLine: staleNote(balance, rows, recharges),
+        },
     };
 }
 
@@ -257,6 +263,8 @@ export function formatRechargeHistoryMessage(
         ""
     );
 
+    const stale = staleNote(recharges);
+
     for (const r of recharges) {
         const date = formatDayMonth(new Date(Date.parse(r.rechargeDate.slice(0, 10))));
         const ok = /success/i.test(r.orderStatus);
@@ -266,6 +274,10 @@ export function formatRechargeHistoryMessage(
             `   energy <code>${r.energyAmount.toFixed(2)}</code> · charges <code>${r.chargeAmount.toFixed(2)}</code>`,
             `   via ${r.rechargeOperator}${ok ? "" : ` · <b>${r.orderStatus}</b>`}`
         );
+    }
+
+    if (stale) {
+        lines.push("", stale);
     }
 
     return lines.join("\n");
@@ -355,6 +367,10 @@ export function formatOverviewMessage(overview: Overview): string {
 
     if (usage) {
         lines.push("", forecastNote(usage));
+    }
+
+    if (overview.staleLine) {
+        lines.push("", overview.staleLine);
     }
 
     return lines.join("\n");

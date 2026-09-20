@@ -52,9 +52,24 @@ function systemInstruction(role: Role, today: string): string {
         "  month is billed far more cheaply, and staying under the lifeline allowance prices the whole month",
         "  at the lowest rate. Advice given from the current late-month rate alone will overstate the cost.",
         "",
-        "Style: reply in the language the user wrote in, including Banglish. Be brief and concrete, a few short",
-        "lines. Telegram HTML is supported for <b>bold</b>, <i>italic</i> and <code>code</code>; do not use",
-        "markdown, headings or tables.",
+        "Language, decided from the user's latest message:",
+        "- Written in Bangla script, or in Banglish (Bangla typed in Latin letters, e.g. 'koto din cholbe',",
+        "  'slab breakdown ta daw', 'ei mase koto kharoch holo'), even when mixed with English words: reply in",
+        "  Bangla script (বাংলা). Never reply in Banglish and never reply to it in English.",
+        "- Written in plain English: reply in English.",
+        "- Keep numbers, dates, 'kWh' and 'BDT' as they are in either language.",
+        "",
+        "Conversation:",
+        "- This is an ongoing chat. Read a short follow-up against what was just discussed. If the previous",
+        "  messages were about particular dates or a particular period, then 'tariff koto?', 'ar oi din?',",
+        "  'eita koto kore?' and similar refer to those same dates, not to the month as a whole.",
+        "- 'koto kore keteche' / 'koto kore' asks for the rate per unit (BDT per kWh), not the total cost.",
+        "- Answer the question asked and stop. Do not repeat a full breakdown the user has already been",
+        "  given; give the specific figure, and at most one line of context.",
+        "- Figures already returned by a tool earlier in the conversation can be reused without calling it again.",
+        "",
+        "Style: be brief and concrete, a few short lines. Telegram HTML is supported for <b>bold</b>,",
+        "<i>italic</i> and <code>code</code>; do not use markdown, headings or tables.",
         "",
         role === "admin"
             ? "This user is the bot administrator and may ask about registered users and bot statistics."
@@ -102,8 +117,12 @@ export async function askGemini(
         if (calls.length === 0) {
             const text = response.text?.trim() || "Sorry, I couldn't work that one out.";
 
+            // The whole turn is kept, tool calls and results included. Keeping
+            // only the final text meant a follow-up such as "and the rate on
+            // those days?" reached the model with none of the figures the
+            // previous answer was built from.
             appendHistory(session, [
-                { role: "user", parts: [{ text: message }] },
+                ...contents.slice(session.history.length),
                 { role: "model", parts: [{ text }] },
             ]);
 
@@ -111,10 +130,14 @@ export async function askGemini(
         }
 
         // Record the model's request, then answer every call before looping.
-        contents.push({
-            role: "model",
-            parts: calls.map((call) => ({ functionCall: call })),
-        });
+        // The model's own content is passed back untouched where available, so
+        // any thought signatures attached to the calls survive the round trip.
+        contents.push(
+            response.candidates?.[0]?.content ?? {
+                role: "model",
+                parts: calls.map((call) => ({ functionCall: call })),
+            }
+        );
 
         const responses = await Promise.all(
             calls.map(async (call) => {

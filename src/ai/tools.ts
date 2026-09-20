@@ -9,6 +9,7 @@ import { getBalanceReport } from "../utils/usage";
 import { getOverview, getRecharges } from "../utils/overview";
 import { Session, cached } from "./session";
 import { activeSessionCount } from "./session";
+import { staleAsOf } from "../descoStore";
 
 export type Role = "user" | "admin";
 
@@ -25,6 +26,25 @@ interface Tool {
     /** Lowest role allowed to call this. */
     minRole: Role;
     handler: (args: any, ctx: ToolContext) => Promise<unknown>;
+}
+
+/**
+ * Flags a result built from a saved copy, so the model tells the user the
+ * figures are not live. `savedCopy` also stops the session cache keeping it,
+ * otherwise a chat would hold on to old data after DESCO had recovered.
+ */
+function withFreshness<T extends object>(result: T, ...sources: unknown[]): T {
+    const times = sources.map(staleAsOf).filter((t): t is Date => Boolean(t));
+    if (times.length === 0) return result;
+
+    const oldest = new Date(Math.min(...times.map((t) => new Date(t).getTime())));
+    return {
+        ...result,
+        savedCopy: true,
+        dataAsOf: oldest.toISOString(),
+        freshnessNote:
+            "DESCO did not respond, so these figures are a saved copy from dataAsOf. Tell the user that plainly.",
+    };
 }
 
 /** No account saved means the DESCO tools cannot run; say so rather than failing. */
@@ -53,7 +73,7 @@ const TOOLS: Record<string, Tool> = {
                 }
 
                 const { data, usage } = result.report;
-                return {
+                return withFreshness({
                     balanceBDT: data.balance,
                     monthToDateCostBDT: data.currentMonthTaka,
                     readingDate: data.readingTime,
@@ -62,7 +82,7 @@ const TOOLS: Record<string, Tool> = {
                     avgDailyKwh: usage?.kwhPerDay ?? null,
                     avgDailyBDT: usage?.takaPerDay ?? null,
                     tariffAware: usage?.tariffAware ?? false,
-                };
+                }, data);
             });
         },
     },
@@ -72,7 +92,8 @@ const TOOLS: Record<string, Tool> = {
         declaration: {
             name: "get_daily_usage",
             description:
-                "Day-by-day electricity consumption for a recent period. Returns each day's kWh and BDT, " +
+                "Day-by-day electricity consumption for a recent period. Returns each day's kWh, BDT and the " +
+                "tariff charged that day (ratePerKwh), " +
                 "plus totals, averages, and the busiest and quietest day. Use for questions about usage on " +
                 "particular dates or trends over days.",
             parameters: {
@@ -116,8 +137,15 @@ const TOOLS: Record<string, Tool> = {
                         date: entry.date,
                         kwh: Number(entry.kwh.toFixed(2)),
                         bdt: Number(entry.taka.toFixed(2)),
+                        // The tariff actually charged that day. Without it a
+                        // question like "what rate was I charged on the 7th"
+                        // leaves the model to do the division, or to skip it.
+                        ratePerKwh: entry.kwh > 0 ? Number((entry.taka / entry.kwh).toFixed(2)) : null,
                         coversDays: entry.spanDays,
                     })),
+                    ...(result.overview.staleLine
+                        ? { savedCopy: true, freshnessNote: "DESCO did not respond; these figures are a saved copy. Tell the user that plainly." }
+                        : {}),
                 };
             });
         },
@@ -150,7 +178,7 @@ const TOOLS: Record<string, Tool> = {
                     return { error: result.error ?? "Could not reach DESCO" };
                 }
 
-                return {
+                return withFreshness({
                     count: result.recharges.length,
                     recharges: result.recharges.map((r) => ({
                         date: r.rechargeDate.slice(0, 10),
@@ -160,7 +188,7 @@ const TOOLS: Record<string, Tool> = {
                         operator: r.rechargeOperator,
                         status: r.orderStatus,
                     })),
-                };
+                }, result.recharges);
             });
         },
     },

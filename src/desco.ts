@@ -1,6 +1,7 @@
 import axios from "axios";
 import dotenv from "dotenv";
 import https from "https";
+import { cachedSeries, isFresh, markStale, readSnapshot, writeSnapshot } from "./descoStore";
 
 dotenv.config();
 
@@ -50,11 +51,14 @@ const API_BASE = "https://prepaid.desco.org.bd/api";
 const API_PREFIXES = ["unified", "tkdes"];
 
 /**
- * A healthy DESCO call returns in about 200ms. 10s is generous enough not to
- * cut off a slow but working response, while keeping the worst case bounded
- * now that a failed attempt is retried.
+ * DESCO's API answers in about 10ms; the time goes into the TLS handshake on
+ * its front-end, measured at 5-15s when it is struggling. A timeout shorter
+ * than the handshake is the worst possible setting: it abandons a handshake
+ * that was most of the way done and starts another from zero. So the timeout
+ * is patient, and the saved copy in descoStore covers the case where even that
+ * is not enough.
  */
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 30_000;
 const RETRY_DELAY_MS = 700;
 
 /**
@@ -65,6 +69,11 @@ const RETRY_DELAY_MS = 700;
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false,
     keepAlive: true,
+    // One connection, shared. The handshake is the expensive part, and calls
+    // made at the same time would otherwise each open their own connection and
+    // each pay it. Queued behind a single socket, the first call pays once and
+    // the rest complete in milliseconds.
+    maxSockets: 1,
 });
 
 const REQUEST_HEADERS = {
@@ -170,6 +179,13 @@ async function descoGet<T>(
     return null;
 }
 
+/** How long a saved copy is served without asking DESCO again. */
+const BALANCE_TTL_MS = 30 * 60 * 1000;
+const RECHARGE_TTL_MS = 30 * 60 * 1000;
+const DAILY_TTL_MS = 3 * 60 * 60 * 1000;
+const MONTHLY_TTL_MS = 12 * 60 * 60 * 1000;
+const CUSTOMER_INFO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 export async function fetchBalance(params?: FetchBalanceParams): Promise<{
     success: boolean;
     data?: DescoResponse;
@@ -188,6 +204,18 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
         return { success: false, error: "Either Account Number or Meter Number is required" };
     }
 
+    const key = `balance:${memoKey(params)}`;
+    const stored = await readSnapshot<{ data: DescoResponse; prefix: string }>(key);
+
+    if (stored?.payload?.prefix) {
+        // Survives restarts, so a fresh process does not rediscover the prefix.
+        prefixMemo.set(memoKey(params), stored.payload.prefix);
+    }
+
+    if (stored && isFresh(stored.fetchedAt, BALANCE_TTL_MS)) {
+        return { success: true, prefix: stored.payload.prefix, data: stored.payload.data };
+    }
+
     console.log(`Fetching balance for Account: ${accountNo || 'N/A'}, Meter: ${meterNo || 'N/A'}`);
 
     const attemptedUrls: string[] = [];
@@ -196,8 +224,7 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
     for (const [index, prefix] of prefixes.entries()) {
         attemptedUrls.push(buildUrl(prefix, "getBalance", { accountNo, meterNo }));
 
-        // Only the first prefix is retried. Retrying every prefix would double
-        // the worst case to a minute, which is far too long for a chat reply.
+        // Only the first prefix is retried, to keep the worst case bounded.
         const data = await descoGet<any>(prefix, "getBalance", { accountNo, meterNo }, index === 0 ? 1 : 0);
         if (!data) continue;
 
@@ -212,14 +239,22 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
         console.log(`✅ Successfully fetched balance for ${accountNo || meterNo} via ${prefix}`);
         prefixMemo.set(memoKey(params), prefix);
 
+        const result: DescoResponse = {
+            balance,
+            currentMonthTaka: currentMonthConsumption ?? 0,
+            readingTime,
+        };
+        await writeSnapshot(key, { data: result, prefix });
+
+        return { success: true, prefix, data: result };
+    }
+
+    if (stored) {
+        console.warn(`DESCO unavailable, serving saved balance from ${stored.fetchedAt.toISOString()}`);
         return {
             success: true,
-            prefix,
-            data: {
-                balance,
-                currentMonthTaka: currentMonthConsumption ?? 0,
-                readingTime,
-            },
+            prefix: stored.payload.prefix,
+            data: markStale({ ...stored.payload.data }, stored.fetchedAt),
         };
     }
 
@@ -250,20 +285,30 @@ export async function fetchDailyConsumption(
         dateTo,
     };
 
-    for (const candidate of prefixesFor(params, prefix)) {
-        const rows = await descoGet<any[]>(candidate, "getCustomerDailyConsumption", query);
+    return cachedSeries<DailyConsumption>({
+        key: `daily:${memoKey(params)}`,
+        ttlMs: DAILY_TTL_MS,
+        from: dateFrom,
+        to: dateTo,
+        idOf: (row) => row.date,
+        dateOf: (row) => row.date,
+        sort: (a, b) => a.date.localeCompare(b.date),
+        load: async () => {
+            for (const candidate of prefixesFor(params, prefix)) {
+                const rows = await descoGet<any[]>(candidate, "getCustomerDailyConsumption", query);
 
-        // An account on the wrong prefix answers 200 with an empty list here.
-        if (Array.isArray(rows) && rows.length > 0) {
-            return rows.map((row) => ({
-                date: row.date,
-                consumedTaka: Number(row.consumedTaka),
-                consumedUnit: Number(row.consumedUnit),
-            }));
-        }
-    }
-
-    return null;
+                // An account on the wrong prefix answers 200 with an empty list here.
+                if (Array.isArray(rows) && rows.length > 0) {
+                    return rows.map((row) => ({
+                        date: row.date,
+                        consumedTaka: Number(row.consumedTaka),
+                        consumedUnit: Number(row.consumedUnit),
+                    }));
+                }
+            }
+            return null;
+        },
+    });
 }
 
 export interface CustomerInfo {
@@ -291,14 +336,24 @@ export async function fetchCustomerInfo(
     params: FetchBalanceParams,
     prefix?: string
 ): Promise<CustomerInfo | null> {
+    const key = `customerInfo:${memoKey(params)}`;
+    const stored = await readSnapshot<CustomerInfo>(key);
+
+    if (stored && isFresh(stored.fetchedAt, CUSTOMER_INFO_TTL_MS)) {
+        return stored.payload;
+    }
+
     const query = { accountNo: params.accountNo, meterNo: params.meterNo };
 
     for (const candidate of prefixesFor(params, prefix)) {
         const data = await descoGet<CustomerInfo>(candidate, "getCustomerInfo", query);
-        if (data) return data;
+        if (data) {
+            await writeSnapshot(key, data);
+            return data;
+        }
     }
 
-    return null;
+    return stored ? markStale({ ...stored.payload }, stored.fetchedAt) : null;
 }
 
 /** Monthly totals for the last `months` months, oldest first. */
@@ -319,21 +374,29 @@ export async function fetchMonthlyConsumption(
         monthTo: asMonth(to),
     };
 
-    for (const candidate of prefixesFor(params, prefix)) {
-        const rows = await descoGet<any[]>(candidate, "getCustomerMonthlyConsumption", query);
-        if (!Array.isArray(rows) || rows.length === 0) continue;
+    return cachedSeries<MonthlyConsumption>({
+        key: `monthly:${memoKey(params)}`,
+        ttlMs: MONTHLY_TTL_MS,
+        from: query.monthFrom,
+        to: query.monthTo,
+        idOf: (row) => row.month,
+        dateOf: (row) => row.month,
+        sort: (a, b) => a.month.localeCompare(b.month),
+        load: async () => {
+            for (const candidate of prefixesFor(params, prefix)) {
+                const rows = await descoGet<any[]>(candidate, "getCustomerMonthlyConsumption", query);
+                if (!Array.isArray(rows) || rows.length === 0) continue;
 
-        return rows
-            .map((row) => ({
-                month: row.month,
-                consumedTaka: Number(row.consumedTaka),
-                consumedUnit: Number(row.consumedUnit),
-                maximumDemand: row.maximumDemand ? Number(row.maximumDemand) : undefined,
-            }))
-            .sort((a, b) => a.month.localeCompare(b.month));
-    }
-
-    return null;
+                return rows.map((row) => ({
+                    month: row.month,
+                    consumedTaka: Number(row.consumedTaka),
+                    consumedUnit: Number(row.consumedUnit),
+                    maximumDemand: row.maximumDemand ? Number(row.maximumDemand) : undefined,
+                }));
+            }
+            return null;
+        },
+    });
 }
 
 /**
@@ -353,22 +416,30 @@ export async function fetchRechargeHistory(
         dateTo,
     };
 
-    for (const candidate of prefixesFor(params, prefix)) {
-        const rows = await descoGet<any[]>(candidate, "getRechargeHistory", query);
-        if (!Array.isArray(rows)) continue;
+    return cachedSeries<RechargeRecord>({
+        key: `recharges:${memoKey(params)}`,
+        ttlMs: RECHARGE_TTL_MS,
+        from: dateFrom,
+        to: dateTo,
+        idOf: (row) => row.orderID,
+        dateOf: (row) => row.rechargeDate.slice(0, 10),
+        sort: (a, b) => b.rechargeDate.localeCompare(a.rechargeDate),
+        load: async () => {
+            for (const candidate of prefixesFor(params, prefix)) {
+                const rows = await descoGet<any[]>(candidate, "getRechargeHistory", query);
+                if (!Array.isArray(rows)) continue;
 
-        return rows
-            .map((row) => ({
-                orderID: String(row.orderID),
-                rechargeDate: row.rechargeDate,
-                totalAmount: Number(row.totalAmount),
-                energyAmount: Number(row.energyAmount),
-                chargeAmount: Number(row.chargeAmount),
-                rechargeOperator: row.rechargeOperator,
-                orderStatus: row.orderStatus,
-            }))
-            .sort((a, b) => b.rechargeDate.localeCompare(a.rechargeDate));
-    }
-
-    return null;
+                return rows.map((row) => ({
+                    orderID: String(row.orderID),
+                    rechargeDate: row.rechargeDate,
+                    totalAmount: Number(row.totalAmount),
+                    energyAmount: Number(row.energyAmount),
+                    chargeAmount: Number(row.chargeAmount),
+                    rechargeOperator: row.rechargeOperator,
+                    orderStatus: row.orderStatus,
+                }));
+            }
+            return null;
+        },
+    });
 }
