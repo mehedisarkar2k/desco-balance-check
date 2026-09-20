@@ -9,6 +9,7 @@ import { handleCallbackQuery } from "./handlers/callbacks";
 import { handleTextMessage } from "./handlers/textMessages";
 import { startBotWithRetry } from "./utils/botLauncher";
 import { BOT_COMMANDS } from "./botCommands";
+import { offerVersionAnnouncement } from "./utils/announcer";
 
 // Apply middleware
 bot.use(autoRegisterMiddleware);
@@ -90,6 +91,14 @@ bot.on("text", handleTextMessage);
 
         await sendMessage("<i>Bot started successfully in " + environment + " mode.</i>");
         await startScheduler();
+
+        // Offers this version's release notes to the admin for approval; it
+        // never broadcasts on its own.
+        try {
+            await offerVersionAnnouncement(bot);
+        } catch (announceError: any) {
+            console.error("Failed to offer version announcement:", announceError.message);
+        }
 
         console.log(`✅ Bot is running and ready to serve multiple users!`);
 

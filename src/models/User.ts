@@ -13,6 +13,7 @@ export interface IUser extends Document {
     thresholdDays?: number; // Warn when the balance is this many days from running out
     hourlyNotificationEnabled: boolean; // Enable hourly notifications when below threshold
     lastLowAlertReadingDate?: string; // DESCO readingTime of the last low-balance alert
+    blockedAt?: Date; // Set when Telegram reports the user unreachable
     createdAt: Date;
     updatedAt: Date;
 }
@@ -51,6 +52,7 @@ const UserSchema = new Schema<IUser>(
             default: false,
         },
         lastLowAlertReadingDate: String,
+        blockedAt: Date,
     },
     {
         timestamps: true,

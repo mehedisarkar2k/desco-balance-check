@@ -4,6 +4,13 @@ import { userSessions } from "./commands";
 import { performBalanceCheck, performOverview, performRechargeHistory } from "../utils/balanceChecker";
 import { refreshSchedules } from "../scheduler";
 import { MAX_OVERVIEW_DAYS } from "../utils/overview";
+import { ADMIN_CHAT_ID, bot } from "../bot";
+import {
+    ANNOUNCE_CONFIRM,
+    ANNOUNCE_DISMISS,
+    sendPendingAnnouncement,
+    dismissPendingAnnouncement,
+} from "../utils/announcer";
 
 export async function handleCallbackQuery(ctx: Context) {
     const data = ctx.callbackQuery && "data" in ctx.callbackQuery ? ctx.callbackQuery.data : null;
@@ -12,6 +19,23 @@ export async function handleCallbackQuery(ctx: Context) {
     if (!userId || !data) return;
 
     await ctx.answerCbQuery();
+
+    if (data === ANNOUNCE_CONFIRM || data === ANNOUNCE_DISMISS) {
+        // Broadcasting reaches every user, so it stays with the admin alone.
+        if (userId !== ADMIN_CHAT_ID) {
+            await ctx.reply("❌ Not available.");
+            return;
+        }
+
+        if (data === ANNOUNCE_DISMISS) {
+            await ctx.reply(dismissPendingAnnouncement());
+            return;
+        }
+
+        await ctx.reply("📢 Sending announcement...");
+        await ctx.reply(await sendPendingAnnouncement(bot), { parse_mode: "HTML" });
+        return;
+    }
 
     if (data === "cancel") {
         userSessions.delete(userId);
