@@ -97,6 +97,37 @@ export class UserService {
     }
 
     /**
+     * Update the days-remaining warning threshold
+     */
+    static async updateThresholdDays(
+        telegramId: number,
+        thresholdDays: number
+    ): Promise<IUser | null> {
+        return await User.findOneAndUpdate(
+            { telegramId },
+            { thresholdDays },
+            { new: true }
+        );
+    }
+
+    /**
+     * Record which DESCO reading a low-balance alert was sent for, so repeat
+     * checks against the same reading stay silent. Pass null once the balance
+     * recovers, so the next dip alerts again.
+     */
+    static async setLastLowAlertReadingDate(
+        telegramId: number,
+        readingDate: string | null
+    ): Promise<void> {
+        await User.updateOne(
+            { telegramId },
+            readingDate
+                ? { lastLowAlertReadingDate: readingDate }
+                : { $unset: { lastLowAlertReadingDate: "" } }
+        );
+    }
+
+    /**
      * Update hourly notification setting
      */
     static async updateHourlyNotification(

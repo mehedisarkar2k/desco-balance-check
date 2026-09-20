@@ -1,69 +1,81 @@
 import { Context } from "telegraf";
-import { fetchBalance } from "../desco";
 import { sendMessage, ADMIN_CHAT_ID } from "../bot";
+import { getBalanceReport, formatBalanceMessage } from "./usage";
+import { getOverview, formatOverviewMessage } from "./overview";
 
 export async function performBalanceCheck(
     ctx: Context,
     params: { accountNo?: string; meterNo?: string }
 ) {
-    // Validate that at least one parameter is provided
     if (!params.accountNo && !params.meterNo) {
         await ctx.reply("❌ Please provide either Account Number or Meter Number.");
         return;
     }
 
-    const result = await fetchBalance({
+    const result = await getBalanceReport({
         accountNo: params.accountNo,
         meterNo: params.meterNo
     });
 
-    if (result.success && result.data) {
-        const { balance, currentMonthConsumption, readingTime } = result.data;
-
-        // Validate that essential fields are present (consumption can be 0)
-        if (balance !== null && balance !== undefined && readingTime) {
-            const consumptionDisplay = currentMonthConsumption > 0
-                ? `<code>${currentMonthConsumption.toFixed(2)} kWh</code>`
-                : `<code>N/A</code>`;
-
-            const message = `
-✅ <b>DESCO Balance</b>
-
-💰 <b>Balance:</b> <code>${balance.toFixed(2)} BDT</code>
-⚡ <b>Consumption:</b> ${consumptionDisplay}
-📅 <b>Reading Time:</b> <code>${readingTime}</code>
-`;
-            await ctx.reply(message, { parse_mode: "HTML" });
-            return;
-        }
+    if (result.success && result.report) {
+        const { data, usage } = result.report;
+        await ctx.reply(
+            formatBalanceMessage(data, usage, "✅ DESCO Balance"),
+            { parse_mode: "HTML" }
+        );
+        return;
     }
 
-    // If we reach here, either result failed or data is incomplete
-    {
-        // Error occurred
-        const errorMsg = result.error || "Incomplete data received from API";
-        console.error(`Balance check failed for user ${ctx.from?.id}:`, errorMsg);
+    await reportFailure(ctx, "Balance Fetch Failed", result.error, result.attemptedUrls);
+}
 
-        await ctx.reply(
-            "❌ Something went wrong while fetching your balance.\n\n" +
-            "This issue has been reported to support. Please wait while we investigate."
-        );
+export async function performOverview(
+    ctx: Context,
+    params: { accountNo?: string; meterNo?: string },
+    days: number
+) {
+    if (!params.accountNo && !params.meterNo) {
+        await ctx.reply("❌ Please provide either Account Number or Meter Number.");
+        return;
+    }
 
-        // Send error details to admin
-        const errorDetails = result.data
-            ? `Incomplete data: ${JSON.stringify(result.data)}`
-            : errorMsg;
+    const result = await getOverview(
+        { accountNo: params.accountNo, meterNo: params.meterNo },
+        days
+    );
 
-        const errorMessage = `
-🚨 <b>Balance Fetch Failed</b>
+    if (result.success && result.overview) {
+        await ctx.reply(formatOverviewMessage(result.overview), { parse_mode: "HTML" });
+        return;
+    }
+
+    await reportFailure(ctx, "Overview Fetch Failed", result.error, result.attemptedUrls);
+}
+
+/** Tells the user something went wrong and forwards the detail to the admin. */
+async function reportFailure(
+    ctx: Context,
+    title: string,
+    error?: string,
+    attemptedUrls?: string[]
+) {
+    const errorMsg = error || "Incomplete data received from API";
+    console.error(`${title} for user ${ctx.from?.id}:`, errorMsg);
+
+    await ctx.reply(
+        "❌ Something went wrong while fetching your data.\n\n" +
+        "This issue has been reported to support. Please wait while we investigate."
+    );
+
+    const errorMessage = `
+🚨 <b>${title}</b>
 
 <b>User:</b> ${ctx.from?.first_name || "Unknown"} (@${ctx.from?.username || "no username"})
 <b>User ID:</b> ${ctx.from?.id}
-<b>Error:</b> ${errorDetails}
+<b>Error:</b> ${errorMsg}
 
 <b>Attempted URLs:</b>
-${result.attemptedUrls?.map((url, i) => `${i + 1}. <code>${url}</code>`).join('\n') || 'No URLs attempted'}
+${attemptedUrls?.map((url, i) => `${i + 1}. <code>${url}</code>`).join('\n') || 'No URLs attempted'}
 `;
-        await sendMessage(errorMessage, ADMIN_CHAT_ID);
-    }
+    await sendMessage(errorMessage, ADMIN_CHAT_ID);
 }

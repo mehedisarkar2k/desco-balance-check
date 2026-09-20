@@ -10,7 +10,9 @@ export interface IUser extends Document {
     isSubscribed: boolean;
     notificationTimes: string[]; // e.g., ["08:00", "16:00"]
     threshold?: number;
+    thresholdDays?: number; // Warn when the balance is this many days from running out
     hourlyNotificationEnabled: boolean; // Enable hourly notifications when below threshold
+    lastLowAlertReadingDate?: string; // DESCO readingTime of the last low-balance alert
     createdAt: Date;
     updatedAt: Date;
 }
@@ -40,10 +42,15 @@ const UserSchema = new Schema<IUser>(
             type: Number,
             default: 100,
         },
+        thresholdDays: {
+            type: Number,
+            default: 3,
+        },
         hourlyNotificationEnabled: {
             type: Boolean,
             default: false,
         },
+        lastLowAlertReadingDate: String,
     },
     {
         timestamps: true,

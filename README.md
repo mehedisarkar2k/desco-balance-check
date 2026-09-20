@@ -14,6 +14,9 @@ A Telegram bot to check DESCO (Dhaka Electric Supply Company) electricity balanc
 ### Balance Checking
 
 - **Instant Balance Check**: Check your DESCO balance on demand
+- **Runway Estimate**: Shows how many days of power you have left and the date it runs out
+- **Burn Rate**: Average daily spend in BDT and kWh, from your last 14 days of readings
+- **Usage Overview**: `/usage` reports any period up to 90 days — total consumption, daily average, highest/lowest day, and recharges in that window
 - **Multiple API Support**: Automatically tries both `unified` and `tkdes` API endpoints
 - **Flexible Input**: Use saved account details or enter custom ones
 - **SSL Certificate Handling**: Handles certificate issues gracefully
@@ -23,7 +26,19 @@ A Telegram bot to check DESCO (Dhaka Electric Supply Company) electricity balanc
 - **Scheduled Notifications**: Get balance updates at your preferred times
 - **Custom Schedule**: Set multiple notification times (e.g., 08:00, 16:00, 20:00)
 - **Low Balance Alerts**: Get warned when balance falls below your threshold
+- **Days-Left Warning**: Get warned when you're a set number of days from running out, which gives more notice than a fixed BDT amount
+- **One Alert Per Reading**: DESCO publishes one reading per day, so low-balance alerts don't repeat hourly
 - **Subscribe/Unsubscribe**: Easy toggle for notifications
+
+## A note on DESCO's API 📝
+
+`getBalance` returns a field named `currentMonthConsumption`. Despite the name it is
+**month-to-date cost in BDT, not kWh** — it matches the `consumedTaka` series from
+`getCustomerDailyConsumption`. This bot exposes it as `currentMonthTaka` to avoid the confusion.
+
+In the daily series, `consumedTaka` is a month-to-date total that resets on the 1st, while
+`consumedUnit` is a lifetime meter reading. Days can also be missing from the series, so the
+burn rate is computed from per-step deltas divided by the days actually spanned.
 
 ## Commands 📋
 

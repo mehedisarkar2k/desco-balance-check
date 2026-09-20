@@ -1,69 +1,92 @@
 import * as cron from "node-cron";
-import { fetchBalance } from "./desco";
 import { sendMessage } from "./bot";
 import { UserService } from "./services/UserService";
 import { bot } from "./bot";
+import { IUser } from "./models/User";
+import {
+    getBalanceReport,
+    formatBalanceMessage,
+    formatLowBalanceAlert,
+    isLowBalance,
+} from "./utils/usage";
 
 const threshold = Number(process.env.THRESHOLD) || 100;
+const DEFAULT_THRESHOLD_DAYS = 3;
 
 const scheduledTasks: Map<string, cron.ScheduledTask> = new Map();
 
-function formatMsg(balance: number, consumption: number, readingTime: string, prefix = "") {
-    const head = prefix ? `<b>${prefix}</b>\n` : "";
-    const consumptionDisplay = consumption > 0
-        ? `<code>${consumption.toFixed(3)} kWh</code>`
-        : `<code>N/A</code>`;
+async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
+    const userId = user.telegramId;
 
-    return `${head}<b>💰 DESCO Balance:</b> <code>${balance.toFixed(2)} BDT</code>\n` +
-        `⚡ <b>Consumption:</b> ${consumptionDisplay}\n` +
-        `📅 <b>Reading:</b> <code>${readingTime}</code>`;
-}
-
-async function checkAndNotifyUser(userId: number, accountNo?: string, meterNo?: string, userThreshold?: number, isHourlyCheck = false) {
     try {
         // Skip if user doesn't have account details
-        if (!accountNo && !meterNo) {
+        if (!user.accountNo && !user.meterNo) {
             console.warn(`User ${userId} has no account details, skipping notification`);
             return null;
         }
 
-        const result = await fetchBalance({
-            accountNo,
-            meterNo
+        const result = await getBalanceReport({
+            accountNo: user.accountNo,
+            meterNo: user.meterNo,
         });
 
-        if (!result.success || !result.data) {
-            await bot.telegram.sendMessage(
-                userId,
-                `<b>❌ Error checking DESCO:</b> ${result.error || "Unknown error"}`,
-                { parse_mode: "HTML" }
-            );
+        if (!result.success || !result.report) {
+            // Hourly checks run unattended; only the scheduled update reports failures,
+            // otherwise a DESCO outage means 24 error messages a day.
+            if (!isHourlyCheck) {
+                await bot.telegram.sendMessage(
+                    userId,
+                    `<b>❌ Error checking DESCO:</b> ${result.error || "Unknown error"}`,
+                    { parse_mode: "HTML" }
+                );
+            }
             return null;
         }
 
-        const { balance, currentMonthConsumption, readingTime } = result.data;
+        const { data, usage } = result.report;
+        const thresholdValue = user.threshold || threshold;
+        const thresholdDays = user.thresholdDays ?? DEFAULT_THRESHOLD_DAYS;
+        const low = isLowBalance(data.balance, usage, thresholdValue, thresholdDays);
 
-        // For hourly checks, only send if balance is low
-        const thresholdValue = userThreshold || threshold;
-        if (isHourlyCheck && balance > thresholdValue) {
-            return balance; // Don't send notification if balance is above threshold
-        }
+        if (isHourlyCheck) {
+            if (!low) {
+                // Recovered, so let the next dip alert again.
+                if (user.lastLowAlertReadingDate) {
+                    await UserService.setLastLowAlertReadingDate(userId, null);
+                }
+                return data.balance;
+            }
 
-        const prefix = isHourlyCheck ? "⏰ Hourly Low Balance Alert" : "🔔 Scheduled Update";
-        const message = formatMsg(balance, currentMonthConsumption, readingTime, prefix);
+            // DESCO publishes one reading per day, so re-alerting on a reading
+            // already sent would repeat the same message every hour.
+            if (user.lastLowAlertReadingDate === data.readingTime) {
+                return data.balance;
+            }
 
-        await bot.telegram.sendMessage(userId, message, { parse_mode: "HTML" });
-
-        // Check threshold for regular notifications
-        if (!isHourlyCheck && balance <= thresholdValue) {
             await bot.telegram.sendMessage(
                 userId,
-                `<b>⚠️ Low Balance Alert!</b>\n\nYour balance (${balance.toFixed(2)} BDT) is below the threshold (${thresholdValue} BDT).`,
+                formatLowBalanceAlert(data.balance, usage, thresholdValue),
+                { parse_mode: "HTML" }
+            );
+            await UserService.setLastLowAlertReadingDate(userId, data.readingTime);
+            return data.balance;
+        }
+
+        await bot.telegram.sendMessage(
+            userId,
+            formatBalanceMessage(data, usage, "🔔 Scheduled Update"),
+            { parse_mode: "HTML" }
+        );
+
+        if (low) {
+            await bot.telegram.sendMessage(
+                userId,
+                formatLowBalanceAlert(data.balance, usage, thresholdValue),
                 { parse_mode: "HTML" }
             );
         }
 
-        return balance;
+        return data.balance;
     } catch (err: any) {
         console.error(`Error notifying user ${userId}:`, err.message);
         return null;
@@ -103,12 +126,7 @@ async function setupUserNotifications() {
                 const subscribedUsers = await UserService.getUsersByNotificationTime(time);
 
                 for (const user of subscribedUsers) {
-                    await checkAndNotifyUser(
-                        user.telegramId,
-                        user.accountNo,
-                        user.meterNo,
-                        user.threshold
-                    );
+                    await checkAndNotifyUser(user);
                     // Add delay to avoid rate limiting
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
@@ -138,13 +156,7 @@ async function checkHourlyLowBalance() {
     const users = await UserService.getUsersWithHourlyNotifications();
 
     for (const user of users) {
-        await checkAndNotifyUser(
-            user.telegramId,
-            user.accountNo,
-            user.meterNo,
-            user.threshold,
-            true // isHourlyCheck
-        );
+        await checkAndNotifyUser(user, true /* isHourlyCheck */);
         // Add delay to avoid rate limiting
         await new Promise(resolve => setTimeout(resolve, 1000));
     }

@@ -30,6 +30,7 @@ export async function handleStart(ctx: Context) {
             "👋 Welcome back to DESCO Balance Check Bot! 🔋\n\n" +
             "Available commands:\n" +
             "/balance - Check your electricity balance\n" +
+            "/usage - Usage overview for the last N days\n" +
             "/me - View your account information\n" +
             "/update - Update your account details\n" +
             "/subscribe - Enable/disable notifications\n" +
@@ -46,6 +47,7 @@ export async function handleHelp(ctx: Context) {
 
 /start - Set up your account (first time users)
 /balance - Check your current DESCO balance
+/usage - Usage overview for the last N days (consumption, averages, recharges)
 /me - View your account and subscription info
 /update - Update your account details
 /subscribe - Manage notification subscriptions
@@ -74,6 +76,9 @@ export async function handleMe(ctx: Context) {
         ? user.notificationTimes.join(", ")
         : "Not set";
     const hourlyStatus = user.hourlyNotificationEnabled ? "✅ Enabled" : "❌ Disabled";
+    const daysWarning = user.thresholdDays && user.thresholdDays > 0
+        ? `${user.thresholdDays} day(s) left`
+        : "Disabled";
 
     const infoText = `
 👤 <b>Your Account Information</b>
@@ -89,7 +94,8 @@ export async function handleMe(ctx: Context) {
 🔔 <b>Subscription:</b> ${subscriptionStatus}
 <b>Notification Times:</b> ${notificationTimes}
 <b>Low Balance Threshold:</b> ${user.threshold} BDT
-<b>Hourly Alerts (when low):</b> ${hourlyStatus}
+<b>Days-Left Warning:</b> ${daysWarning}
+<b>Alerts When Low:</b> ${hourlyStatus}
 
 <i>Use /update to modify your details</i>
 <i>Use /subscribe to manage notifications</i>
@@ -106,8 +112,9 @@ export async function handleUpdate(ctx: Context) {
         Markup.inlineKeyboard([
             [Markup.button.callback("📝 Account/Meter Number", "update_account")],
             [Markup.button.callback("⚙️ Notification Times", "update_times")],
-            [Markup.button.callback("⚠️ Low Balance Threshold", "update_threshold")],
-            [Markup.button.callback("🔔 Hourly Alerts Setting", "update_hourly")],
+            [Markup.button.callback("⚠️ Low Balance Threshold (BDT)", "update_threshold")],
+            [Markup.button.callback("⏳ Days-Left Warning", "update_threshold_days")],
+            [Markup.button.callback("🔔 Low Balance Alerts", "update_hourly")],
             [Markup.button.callback("❌ Cancel", "cancel")]
         ])
     );
@@ -139,6 +146,34 @@ export async function handleBalance(ctx: Context) {
         userSessions.set(userId, { step: "waiting_for_account" });
         await ctx.reply("Please enter your Account Number (or type 'skip' to omit):");
     }
+}
+
+export async function handleUsage(ctx: Context) {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const user = await UserService.getUser(userId);
+
+    if (!user || (!user.accountNo && !user.meterNo)) {
+        await ctx.reply("❌ Please set up your account using /start first.");
+        return;
+    }
+
+    await ctx.reply(
+        "📊 <b>Usage Overview</b>\n\nHow many days would you like to see?",
+        {
+            parse_mode: "HTML",
+            ...Markup.inlineKeyboard([
+                [
+                    Markup.button.callback("7 days", "usage_7"),
+                    Markup.button.callback("15 days", "usage_15"),
+                    Markup.button.callback("30 days", "usage_30"),
+                ],
+                [Markup.button.callback("✏️ Custom", "usage_custom")],
+                [Markup.button.callback("❌ Cancel", "cancel")],
+            ]),
+        }
+    );
 }
 
 export async function handleSubscribe(ctx: Context) {

@@ -1,8 +1,9 @@
 import { Context } from "telegraf";
 import { UserService } from "../services/UserService";
 import { userSessions } from "./commands";
-import { performBalanceCheck } from "../utils/balanceChecker";
+import { performBalanceCheck, performOverview } from "../utils/balanceChecker";
 import { refreshSchedules } from "../scheduler";
+import { MAX_OVERVIEW_DAYS } from "../utils/overview";
 
 export async function handleCallbackQuery(ctx: Context) {
     const data = ctx.callbackQuery && "data" in ctx.callbackQuery ? ctx.callbackQuery.data : null;
@@ -32,6 +33,29 @@ export async function handleCallbackQuery(ctx: Context) {
             accountNo: user.accountNo,
             meterNo: user.meterNo
         });
+    } else if (data.startsWith("usage_")) {
+        const choice = data.slice("usage_".length);
+
+        if (choice === "custom") {
+            userSessions.set(userId, { step: "usage_custom_days" });
+            await ctx.reply(
+                `How many days would you like to see? (1–${MAX_OVERVIEW_DAYS})`
+            );
+            return;
+        }
+
+        const user = await UserService.getUser(userId);
+        if (!user || (!user.accountNo && !user.meterNo)) {
+            await ctx.reply("❌ No saved account details found. Please use /start to set up.");
+            return;
+        }
+
+        await ctx.reply(`Building your ${choice}-day overview... ⏳`);
+        await performOverview(
+            ctx,
+            { accountNo: user.accountNo, meterNo: user.meterNo },
+            Number(choice)
+        );
     } else if (data === "enter_custom") {
         userSessions.set(userId, { step: "waiting_for_account" });
         await ctx.reply("Please enter your Account Number (or type 'skip' to omit):");
@@ -48,14 +72,26 @@ export async function handleCallbackQuery(ctx: Context) {
     } else if (data === "update_threshold") {
         userSessions.set(userId, { step: "update_threshold" });
         await ctx.reply("Please enter your new low balance threshold (in BDT):");
+    } else if (data === "update_threshold_days") {
+        userSessions.set(userId, { step: "update_threshold_days" });
+        await ctx.reply(
+            "⏳ <b>Days-Left Warning</b>\n\n" +
+            "Your balance is compared against how fast you actually use power, " +
+            "so you get warned with enough time to recharge.\n\n" +
+            "How many days of power left should trigger a warning?\n\n" +
+            "<i>Example: 5 (warn when about 5 days of power remain)</i>\n" +
+            "<i>Type '0' to disable and use only the BDT threshold</i>",
+            { parse_mode: "HTML" }
+        );
     } else if (data === "update_hourly") {
         userSessions.set(userId, { step: "update_hourly_threshold" });
         await ctx.reply(
-            "⏰ <b>Hourly Low Balance Alerts</b>\n\n" +
-            "When your balance falls below a certain amount, you can receive alerts every hour.\n\n" +
-            "Please enter the minimum balance threshold for hourly notifications (in BDT):\n\n" +
-            "<i>Example: 50 (you'll get hourly alerts when balance ≤ 50 BDT)</i>\n" +
-            "<i>Type '0' to disable hourly alerts</i>",
+            "⏰ <b>Low Balance Alerts</b>\n\n" +
+            "When your balance falls below a certain amount, your account is re-checked hourly. " +
+            "DESCO publishes one reading per day, so you'll get one alert per new reading.\n\n" +
+            "Please enter the minimum balance threshold (in BDT):\n\n" +
+            "<i>Example: 50 (you'll be alerted when balance ≤ 50 BDT)</i>\n" +
+            "<i>Type '0' to disable these alerts</i>",
             { parse_mode: "HTML" }
         );
     } else if (data === "toggle_subscription") {

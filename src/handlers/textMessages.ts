@@ -1,8 +1,9 @@
 import { Context } from "telegraf";
 import { UserService } from "../services/UserService";
 import { userSessions } from "./commands";
-import { performBalanceCheck } from "../utils/balanceChecker";
+import { performBalanceCheck, performOverview } from "../utils/balanceChecker";
 import { refreshSchedules } from "../scheduler";
+import { MIN_OVERVIEW_DAYS, MAX_OVERVIEW_DAYS } from "../utils/overview";
 
 export async function handleTextMessage(ctx: Context) {
     const userId = ctx.from?.id;
@@ -67,6 +68,28 @@ export async function handleTextMessage(ctx: Context) {
         });
         userSessions.delete(userId);
     }
+    // Usage overview flow
+    else if (session.step === "usage_custom_days") {
+        const days = parseInt(text);
+
+        if (isNaN(days) || days < MIN_OVERVIEW_DAYS || days > MAX_OVERVIEW_DAYS) {
+            await ctx.reply(
+                `❌ Please enter a number of days between ${MIN_OVERVIEW_DAYS} and ${MAX_OVERVIEW_DAYS} (e.g., 10)`
+            );
+            return;
+        }
+
+        const user = await UserService.getUser(userId);
+        if (!user || (!user.accountNo && !user.meterNo)) {
+            await ctx.reply("❌ Please set up your account using /start first.");
+            userSessions.delete(userId);
+            return;
+        }
+
+        userSessions.delete(userId);
+        await ctx.reply(`Building your ${days}-day overview... ⏳`);
+        await performOverview(ctx, { accountNo: user.accountNo, meterNo: user.meterNo }, days);
+    }
     // Update flows
     else if (session.step === "update_account_no") {
         const accountNo = text.toLowerCase() === "skip" ? undefined : text.trim();
@@ -106,6 +129,22 @@ export async function handleTextMessage(ctx: Context) {
         userSessions.delete(userId);
 
         await ctx.reply(`✅ Low balance threshold updated to ${threshold} BDT`);
+    } else if (session.step === "update_threshold_days") {
+        const days = parseInt(text);
+
+        if (isNaN(days) || days < 0 || days > 60) {
+            await ctx.reply("❌ Please enter a number of days between 0 and 60 (e.g., 5)");
+            return;
+        }
+
+        await UserService.updateThresholdDays(userId, days);
+        userSessions.delete(userId);
+
+        await ctx.reply(
+            days > 0
+                ? `✅ You'll be warned when your balance has about ${days} day(s) of power left.`
+                : "✅ Days-left warnings disabled. Only the BDT threshold will trigger alerts."
+        );
     } else if (session.step === "update_hourly_threshold") {
         const threshold = parseInt(text);
 
@@ -122,11 +161,12 @@ export async function handleTextMessage(ctx: Context) {
 
         if (enabled) {
             await ctx.reply(
-                `✅ Hourly alerts enabled!\n\n` +
-                `You'll receive notifications every hour when your balance is ≤ ${threshold} BDT.`
+                `✅ Low balance alerts enabled!\n\n` +
+                `Your balance will be checked hourly when it's ≤ ${threshold} BDT. ` +
+                `DESCO publishes one reading per day, so you'll get one alert per reading — not one every hour.`
             );
         } else {
-            await ctx.reply(`✅ Hourly alerts disabled.`);
+            await ctx.reply(`✅ Low balance alerts disabled.`);
         }
     }
 }

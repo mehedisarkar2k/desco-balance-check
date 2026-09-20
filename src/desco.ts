@@ -6,8 +6,34 @@ dotenv.config();
 
 export interface DescoResponse {
     balance: number;
-    currentMonthConsumption: number;
+    /**
+     * Month-to-date cost in BDT, NOT kWh. DESCO names this field
+     * "currentMonthConsumption", which reads like energy but matches the
+     * `consumedTaka` series from getCustomerDailyConsumption.
+     */
+    currentMonthTaka: number;
     readingTime: string;
+}
+
+export interface DailyConsumption {
+    date: string;
+    /** Month-to-date cost in BDT. Resets to ~0 on the 1st of each month. */
+    consumedTaka: number;
+    /** Lifetime meter reading in kWh. Only resets if the meter is replaced. */
+    consumedUnit: number;
+}
+
+export interface RechargeRecord {
+    orderID: string;
+    /** "YYYY-MM-DD HH:mm:ss.S" in DESCO's response. */
+    rechargeDate: string;
+    totalAmount: number;
+    /** Portion of totalAmount that actually became energy credit. */
+    energyAmount: number;
+    /** Demand charge, meter rent and VAT, less any rebate. */
+    chargeAmount: number;
+    rechargeOperator: string;
+    orderStatus: string;
 }
 
 export interface FetchBalanceParams {
@@ -15,70 +41,76 @@ export interface FetchBalanceParams {
     meterNo?: string;
 }
 
-const API_ENDPOINTS = [
-    "https://prepaid.desco.org.bd/api/unified/customer/getBalance",
-    "https://prepaid.desco.org.bd/api/tkdes/customer/getBalance"
-];
+const API_BASE = "https://prepaid.desco.org.bd/api";
 
-async function tryFetchFromEndpoint(url: string, params: FetchBalanceParams): Promise<DescoResponse | null> {
+/**
+ * An account lives on exactly one of these; the other answers with
+ * code 16001 ("The Account No. does not exist").
+ */
+const API_PREFIXES = ["unified", "tkdes"];
+
+/**
+ * DESCO's server does not send its intermediate certificate, so Node cannot
+ * build the chain and fails with UNABLE_TO_VERIFY_LEAF_SIGNATURE. Kept as a
+ * single shared agent rather than one per request.
+ */
+const httpsAgent = new https.Agent({
+    rejectUnauthorized: false,
+    keepAlive: true,
+});
+
+const REQUEST_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Connection': 'keep-alive',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Referer': 'https://prepaid.desco.org.bd/',
+    'Origin': 'https://prepaid.desco.org.bd'
+};
+
+function buildUrl(prefix: string, endpoint: string, query: Record<string, string | undefined>): string {
+    const queryParams = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+        if (value) {
+            queryParams.append(key, value);
+        }
+    }
+    return `${API_BASE}/${prefix}/customer/${endpoint}?${queryParams.toString()}`;
+}
+
+/**
+ * Calls one endpoint on one prefix. Returns the `data` payload, or null if the
+ * request failed or DESCO answered with a non-200 code in the body.
+ */
+async function descoGet<T>(
+    prefix: string,
+    endpoint: string,
+    query: Record<string, string | undefined>
+): Promise<T | null> {
+    const url = buildUrl(prefix, endpoint, query);
+
     try {
-        const queryParams = new URLSearchParams();
-        if (params.accountNo) {
-            queryParams.append("accountNo", params.accountNo);
-        }
-        if (params.meterNo) {
-            queryParams.append("meterNo", params.meterNo);
-        }
-
-        const fullUrl = `${url}?${queryParams.toString()}`;
-
-        console.log(`Fetching from: ${fullUrl}`);
-
-        const { data } = await axios.get(fullUrl, {
-            timeout: 15000, // Increased timeout to 15 seconds
-            httpsAgent: new https.Agent({
-                rejectUnauthorized: false
-            }),
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Referer': 'https://prepaid.desco.org.bd/',
-                'Origin': 'https://prepaid.desco.org.bd'
-            },
-            validateStatus: (status) => status < 500 // Don't throw on 4xx errors
+        const { data } = await axios.get(url, {
+            timeout: 15000,
+            httpsAgent,
+            headers: REQUEST_HEADERS,
+            validateStatus: (status) => status < 500,
         });
 
-        console.log(`API Response from ${url}:`, JSON.stringify(data));
-
-        if (data.code === 200 && data.data) {
-            const { balance, currentMonthConsumption, readingTime } = data.data;
-
-            // Validate essential data fields (currentMonthConsumption can be null)
-            if (balance !== null && balance !== undefined && readingTime) {
-                return {
-                    balance,
-                    currentMonthConsumption: currentMonthConsumption ?? 0, // Default to 0 if null
-                    readingTime
-                };
-            } else {
-                console.warn(`Incomplete data from ${url}:`, data.data);
-                return null;
-            }
-        } else if (data.code) {
-            console.warn(`API returned code ${data.code}:`, data.message || data);
+        if (data?.code === 200 && data.data) {
+            return data.data as T;
         }
 
+        if (data?.code) {
+            console.warn(`${prefix}/${endpoint} returned code ${data.code}: ${data.desc || data.message || ""}`);
+        }
         return null;
     } catch (error: any) {
-        console.error(`Error fetching from ${url}:`, error.message);
+        console.error(`Error calling ${prefix}/${endpoint}:`, error.message);
         if (error.response) {
             console.error(`Response status: ${error.response.status}`);
-            console.error(`Response data:`, error.response.data);
         }
         return null;
     }
@@ -87,18 +119,17 @@ async function tryFetchFromEndpoint(url: string, params: FetchBalanceParams): Pr
 export async function fetchBalance(params?: FetchBalanceParams): Promise<{
     success: boolean;
     data?: DescoResponse;
+    /** The prefix that answered, so follow-up calls can skip the other one. */
+    prefix?: string;
     error?: string;
     attemptedUrls?: string[];
-    apiResponses?: any[]; // Store actual API responses for debugging
 }> {
-    // Require params to be provided
     if (!params) {
         return { success: false, error: "Account parameters are required" };
     }
 
     const { accountNo, meterNo } = params;
 
-    // Both cannot be empty
     if (!accountNo && !meterNo) {
         return { success: false, error: "Either Account Number or Meter Number is required" };
     }
@@ -106,31 +137,31 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
     console.log(`Fetching balance for Account: ${accountNo || 'N/A'}, Meter: ${meterNo || 'N/A'}`);
 
     const attemptedUrls: string[] = [];
-    const apiResponses: any[] = [];
 
-    // Try both endpoints
-    for (const endpoint of API_ENDPOINTS) {
-        const queryParams = new URLSearchParams();
-        if (accountNo) {
-            queryParams.append("accountNo", accountNo);
-        }
-        if (meterNo) {
-            queryParams.append("meterNo", meterNo);
-        }
-        const fullUrl = `${endpoint}?${queryParams.toString()}`;
-        attemptedUrls.push(fullUrl);
+    for (const prefix of API_PREFIXES) {
+        attemptedUrls.push(buildUrl(prefix, "getBalance", { accountNo, meterNo }));
 
-        const result = await tryFetchFromEndpoint(endpoint, { accountNo, meterNo });
-        if (result) {
-            console.log(`✅ Successfully fetched balance for ${accountNo || meterNo}`);
-            return { success: true, data: result };
-        } else {
-            // Store the failed attempt
-            apiResponses.push({
-                endpoint,
-                params: { accountNo, meterNo }
-            });
+        const data = await descoGet<any>(prefix, "getBalance", { accountNo, meterNo });
+        if (!data) continue;
+
+        const { balance, currentMonthConsumption, readingTime } = data;
+
+        // currentMonthConsumption may legitimately be null early in a month.
+        if (balance === null || balance === undefined || !readingTime) {
+            console.warn(`Incomplete balance data from ${prefix}:`, data);
+            continue;
         }
+
+        console.log(`✅ Successfully fetched balance for ${accountNo || meterNo} via ${prefix}`);
+        return {
+            success: true,
+            prefix,
+            data: {
+                balance,
+                currentMonthTaka: currentMonthConsumption ?? 0,
+                readingTime,
+            },
+        };
     }
 
     console.error(`❌ All API endpoints failed for Account: ${accountNo}, Meter: ${meterNo}`);
@@ -139,6 +170,76 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
         success: false,
         error: "Failed to fetch balance from both API endpoints",
         attemptedUrls,
-        apiResponses
     };
+}
+
+/**
+ * Daily consumption rows for a date range, oldest first. Pass `prefix` from a
+ * preceding fetchBalance call to avoid retrying the prefix that does not serve
+ * this account.
+ */
+export async function fetchDailyConsumption(
+    params: FetchBalanceParams,
+    dateFrom: string,
+    dateTo: string,
+    prefix?: string
+): Promise<DailyConsumption[] | null> {
+    const query = {
+        accountNo: params.accountNo,
+        meterNo: params.meterNo,
+        dateFrom,
+        dateTo,
+    };
+
+    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+        const rows = await descoGet<any[]>(candidate, "getCustomerDailyConsumption", query);
+
+        // An account on the wrong prefix answers 200 with an empty list here.
+        if (Array.isArray(rows) && rows.length > 0) {
+            return rows.map((row) => ({
+                date: row.date,
+                consumedTaka: Number(row.consumedTaka),
+                consumedUnit: Number(row.consumedUnit),
+            }));
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Recharges in a date range, newest first. Returns an empty array when the
+ * account simply had no recharges, and null when the lookup failed.
+ */
+export async function fetchRechargeHistory(
+    params: FetchBalanceParams,
+    dateFrom: string,
+    dateTo: string,
+    prefix?: string
+): Promise<RechargeRecord[] | null> {
+    const query = {
+        accountNo: params.accountNo,
+        meterNo: params.meterNo,
+        dateFrom,
+        dateTo,
+    };
+
+    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+        const rows = await descoGet<any[]>(candidate, "getRechargeHistory", query);
+        if (!Array.isArray(rows)) continue;
+
+        return rows
+            .map((row) => ({
+                orderID: String(row.orderID),
+                rechargeDate: row.rechargeDate,
+                totalAmount: Number(row.totalAmount),
+                energyAmount: Number(row.energyAmount),
+                chargeAmount: Number(row.chargeAmount),
+                rechargeOperator: row.rechargeOperator,
+                orderStatus: row.orderStatus,
+            }))
+            .sort((a, b) => b.rechargeDate.localeCompare(a.rechargeDate));
+    }
+
+    return null;
 }
