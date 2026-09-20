@@ -13,6 +13,7 @@ import {
     dailyDeltas,
     summarizeUsage,
     formatDayMonth,
+    forecastNote,
     USAGE_WINDOW_DAYS,
     TARIFF_WINDOW_DAYS,
 } from "./usage";
@@ -317,6 +318,10 @@ export function formatOverviewMessage(overview: Overview): string {
     }
 
     lines.push("", `📅 <b>Reading:</b> <code>${balance.readingTime}</code>`);
+
+    if (usage) {
+        lines.push("", forecastNote(usage));
+    }
 
     return lines.join("\n");
 }

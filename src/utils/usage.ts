@@ -240,7 +240,27 @@ export function formatBalanceMessage(
         `📅 <b>Reading:</b> <code>${data.readingTime}</code>`
     );
 
+    if (usage) {
+        lines.push("", forecastNote(usage));
+    }
+
     return lines.join("\n");
+}
+
+/**
+ * States that the runway is a projection, not a promise.
+ *
+ * It assumes consumption carries on at the recent average, so a hotter week or
+ * guests staying will shorten it. Presented as a bare number it reads like a
+ * fact about the account, which invites people to leave recharging until the
+ * day before it says they will run out.
+ */
+export function forecastNote(usage: UsageSummary): string {
+    return usage.tariffAware
+        ? `<i>ℹ️ Days left is a forecast: your recent usage priced against DESCO's ` +
+          `slab rates, including the reset on the 1st. Use more and it will be shorter.</i>`
+        : `<i>ℹ️ Days left is a rough forecast at your recent average rate. There aren't ` +
+          `enough readings yet to apply DESCO's slab rates, so expect it to be off.</i>`;
 }
 
 /** Whether the account should be treated as low: by runway if known, else by balance. */
