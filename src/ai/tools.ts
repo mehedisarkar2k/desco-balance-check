@@ -2,7 +2,9 @@ import { Type } from "@google/genai";
 import type { FunctionDeclaration } from "@google/genai";
 import { UserService } from "../services/UserService";
 import { User } from "../models/User";
-import { fetchCustomerInfo, fetchMonthlyConsumption } from "../desco";
+import { fetchCustomerInfo, fetchMonthlyConsumption, fetchDailyConsumption } from "../desco";
+import { buildMonthCurves, describeTariff } from "../domain/tariff";
+import { consumptionRange, TARIFF_WINDOW_DAYS } from "../utils/usage";
 import { getBalanceReport } from "../utils/usage";
 import { getOverview, getRecharges } from "../utils/overview";
 import { Session, cached } from "./session";
@@ -239,6 +241,51 @@ const TOOLS: Record<string, Tool> = {
                 accountNo: user.accountNo ?? null,
                 meterNo: user.meterNo ?? null,
             };
+        },
+    },
+
+    get_tariff_breakdown: {
+        minRole: "user",
+        declaration: {
+            name: "get_tariff_breakdown",
+            description:
+                "How this month's electricity is being priced: consumption and cost so far, the average rate " +
+                "paid per kWh, what the next kWh costs right now, what it cost at the start of the month, and " +
+                "the rate bands (slabs) observed. Use for questions about slabs, rates, why cost per unit " +
+                "changed, or why electricity seems more expensive later in the month.",
+        },
+        handler: async (_args, ctx) => {
+            const params = requireAccount(ctx);
+            if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
+
+            return await cached(ctx.session, "tariff", async () => {
+                const balance = await getBalanceReport(params);
+                if (!balance.success || !balance.report) {
+                    return { error: balance.error ?? "Could not reach DESCO" };
+                }
+
+                const readingTime = balance.report.data.readingTime;
+                const { dateFrom, dateTo } = consumptionRange(readingTime, TARIFF_WINDOW_DAYS);
+                const rows = await fetchDailyConsumption(params, dateFrom, dateTo);
+                if (!rows) return { error: "Could not load consumption readings from DESCO." };
+
+                const curve = buildMonthCurves(rows).find((c) => c.month === readingTime.slice(0, 7));
+                if (!curve) {
+                    return { error: "Not enough readings yet this month to work out the rate bands." };
+                }
+
+                const breakdown = describeTariff(curve);
+                if (!breakdown) return { error: "Could not derive the tariff for this month." };
+
+                return {
+                    ...breakdown,
+                    note:
+                        "Rates are derived from this account's own readings, not a published table. " +
+                        "The band resets on the 1st of each month, so the rate rises as monthly consumption " +
+                        "grows and drops again next month. Bands shown omit the transition steps where DESCO " +
+                        "re-prices the month, so there may be small gaps between band ranges.",
+                };
+            });
         },
     },
 

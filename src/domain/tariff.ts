@@ -109,6 +109,105 @@ export function costBetween(curve: MonthCurve, fromUnits: number, toUnits: numbe
     return Math.max(0, costUpTo(curve, toUnits) - costUpTo(curve, fromUnits));
 }
 
+export interface TariffBand {
+    fromKwh: number;
+    toKwh: number;
+    ratePerKwh: number;
+}
+
+export interface TariffBreakdown {
+    month: string;
+    monthToDateKwh: number;
+    monthToDateBDT: number;
+    /** Average paid per kWh so far this month. */
+    effectiveRatePerKwh: number;
+    /** What the next kWh costs right now. */
+    currentRatePerKwh: number;
+    /** What the first kWh of the month cost, for comparison. */
+    openingRatePerKwh: number;
+    bands: TariffBand[];
+}
+
+/** Two rates close enough to be the same band, allowing for rounding. */
+function sameRate(a: number, b: number): boolean {
+    return Math.abs(a - b) <= Math.max(0.02, b * 0.01);
+}
+
+/**
+ * The rate bands visible in a month's curve.
+ *
+ * Crossing a band re-prices the whole month, so the step spanning a crossing
+ * shows a rate belonging to neither band. Only runs of two or more segments at
+ * a steady rate are reported as bands; the single steps between them are
+ * transitions and are left out rather than presented as a real rate.
+ */
+export function deriveBands(curve: MonthCurve): TariffBand[] {
+    const points = curve.points;
+    const segments: Array<{ from: number; to: number; rate: number }> = [];
+
+    for (let i = 1; i < points.length; i++) {
+        const span = points[i].units - points[i - 1].units;
+        if (span <= 0) continue;
+
+        segments.push({
+            from: points[i - 1].units,
+            to: points[i].units,
+            rate: (points[i].taka - points[i - 1].taka) / span,
+        });
+    }
+
+    const bands: TariffBand[] = [];
+    let run: typeof segments = [];
+
+    const flush = () => {
+        if (run.length >= 2) {
+            bands.push({
+                fromKwh: Number(run[0].from.toFixed(2)),
+                toKwh: Number(run[run.length - 1].to.toFixed(2)),
+                ratePerKwh: Number((run.reduce((s, x) => s + x.rate, 0) / run.length).toFixed(3)),
+            });
+        }
+        run = [];
+    };
+
+    for (const segment of segments) {
+        if (run.length === 0 || sameRate(segment.rate, run[run.length - 1].rate)) {
+            run.push(segment);
+        } else {
+            flush();
+            run = [segment];
+        }
+    }
+    flush();
+
+    return bands;
+}
+
+/** Where the customer currently sits in the month's tariff. */
+export function describeTariff(curve: MonthCurve): TariffBreakdown | null {
+    const points = curve.points;
+    if (points.length < 2) return null;
+
+    const latest = points[points.length - 1];
+    if (latest.units <= 0) return null;
+
+    const bands = deriveBands(curve);
+    const first = points[1];
+
+    // A small step forward prices the next unit at the current position.
+    const currentRate = costUpTo(curve, latest.units + 1) - costUpTo(curve, latest.units);
+
+    return {
+        month: curve.month,
+        monthToDateKwh: Number(latest.units.toFixed(2)),
+        monthToDateBDT: Number(latest.taka.toFixed(2)),
+        effectiveRatePerKwh: Number((latest.taka / latest.units).toFixed(3)),
+        currentRatePerKwh: Number(currentRate.toFixed(3)),
+        openingRatePerKwh: Number((first.taka / first.units).toFixed(3)),
+        bands,
+    };
+}
+
 /**
  * The curve to price a *future* month with.
  *
