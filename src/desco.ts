@@ -50,6 +50,14 @@ const API_BASE = "https://prepaid.desco.org.bd/api";
 const API_PREFIXES = ["unified", "tkdes"];
 
 /**
+ * A healthy DESCO call returns in about 200ms. 10s is generous enough not to
+ * cut off a slow but working response, while keeping the worst case bounded
+ * now that a failed attempt is retried.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+const RETRY_DELAY_MS = 700;
+
+/**
  * DESCO's server does not send its intermediate certificate, so Node cannot
  * build the chain and fails with UNABLE_TO_VERIFY_LEAF_SIGNATURE. Kept as a
  * single shared agent rather than one per request.
@@ -70,6 +78,39 @@ const REQUEST_HEADERS = {
     'Origin': 'https://prepaid.desco.org.bd'
 };
 
+/**
+ * Which prefix last served an account, so the one known to work is tried
+ * first. An account does not move between prefixes, and the other answers
+ * "The Account No. does not exist", which is misleading in logs and wastes a
+ * full timeout when DESCO is slow.
+ */
+const prefixMemo = new Map<string, string>();
+
+function memoKey(params: FetchBalanceParams): string {
+    return `${params.accountNo ?? ""}:${params.meterNo ?? ""}`;
+}
+
+/** Prefixes to try, best guess first. */
+function prefixesFor(params: FetchBalanceParams, forced?: string): string[] {
+    if (forced) return [forced];
+
+    const known = prefixMemo.get(memoKey(params));
+    if (!known) return API_PREFIXES;
+
+    return [known, ...API_PREFIXES.filter((prefix) => prefix !== known)];
+}
+
+/** A timeout or dropped connection, as opposed to DESCO answering with an error. */
+function isTransient(error: any): boolean {
+    if (error?.response) return false; // DESCO answered; not a network fault.
+    return (
+        error?.code === "ECONNABORTED" ||
+        error?.code === "ETIMEDOUT" ||
+        error?.code === "ECONNRESET" ||
+        /timeout/i.test(error?.message ?? "")
+    );
+}
+
 function buildUrl(prefix: string, endpoint: string, query: Record<string, string | undefined>): string {
     const queryParams = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) {
@@ -87,33 +128,46 @@ function buildUrl(prefix: string, endpoint: string, query: Record<string, string
 async function descoGet<T>(
     prefix: string,
     endpoint: string,
-    query: Record<string, string | undefined>
+    query: Record<string, string | undefined>,
+    retries = 0
 ): Promise<T | null> {
     const url = buildUrl(prefix, endpoint, query);
 
-    try {
-        const { data } = await axios.get(url, {
-            timeout: 15000,
-            httpsAgent,
-            headers: REQUEST_HEADERS,
-            validateStatus: (status) => status < 500,
-        });
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const { data } = await axios.get(url, {
+                timeout: REQUEST_TIMEOUT_MS,
+                httpsAgent,
+                headers: REQUEST_HEADERS,
+                validateStatus: (status) => status < 500,
+            });
 
-        if (data?.code === 200 && data.data) {
-            return data.data as T;
-        }
+            if (data?.code === 200 && data.data) {
+                return data.data as T;
+            }
 
-        if (data?.code) {
-            console.warn(`${prefix}/${endpoint} returned code ${data.code}: ${data.desc || data.message || ""}`);
+            // DESCO answered with a refusal; retrying would get the same answer.
+            if (data?.code) {
+                console.warn(`${prefix}/${endpoint} returned code ${data.code}: ${data.desc || data.message || ""}`);
+            }
+            return null;
+        } catch (error: any) {
+            const canRetry = attempt < retries && isTransient(error);
+            console.error(
+                `Error calling ${prefix}/${endpoint}:`,
+                error.message,
+                canRetry ? "(retrying)" : ""
+            );
+            if (error.response) {
+                console.error(`Response status: ${error.response.status}`);
+            }
+            if (!canRetry) return null;
+
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
         }
-        return null;
-    } catch (error: any) {
-        console.error(`Error calling ${prefix}/${endpoint}:`, error.message);
-        if (error.response) {
-            console.error(`Response status: ${error.response.status}`);
-        }
-        return null;
     }
+
+    return null;
 }
 
 export async function fetchBalance(params?: FetchBalanceParams): Promise<{
@@ -137,11 +191,14 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
     console.log(`Fetching balance for Account: ${accountNo || 'N/A'}, Meter: ${meterNo || 'N/A'}`);
 
     const attemptedUrls: string[] = [];
+    const prefixes = prefixesFor(params);
 
-    for (const prefix of API_PREFIXES) {
+    for (const [index, prefix] of prefixes.entries()) {
         attemptedUrls.push(buildUrl(prefix, "getBalance", { accountNo, meterNo }));
 
-        const data = await descoGet<any>(prefix, "getBalance", { accountNo, meterNo });
+        // Only the first prefix is retried. Retrying every prefix would double
+        // the worst case to a minute, which is far too long for a chat reply.
+        const data = await descoGet<any>(prefix, "getBalance", { accountNo, meterNo }, index === 0 ? 1 : 0);
         if (!data) continue;
 
         const { balance, currentMonthConsumption, readingTime } = data;
@@ -153,6 +210,8 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
         }
 
         console.log(`✅ Successfully fetched balance for ${accountNo || meterNo} via ${prefix}`);
+        prefixMemo.set(memoKey(params), prefix);
+
         return {
             success: true,
             prefix,
@@ -191,7 +250,7 @@ export async function fetchDailyConsumption(
         dateTo,
     };
 
-    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+    for (const candidate of prefixesFor(params, prefix)) {
         const rows = await descoGet<any[]>(candidate, "getCustomerDailyConsumption", query);
 
         // An account on the wrong prefix answers 200 with an empty list here.
@@ -234,7 +293,7 @@ export async function fetchCustomerInfo(
 ): Promise<CustomerInfo | null> {
     const query = { accountNo: params.accountNo, meterNo: params.meterNo };
 
-    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+    for (const candidate of prefixesFor(params, prefix)) {
         const data = await descoGet<CustomerInfo>(candidate, "getCustomerInfo", query);
         if (data) return data;
     }
@@ -260,7 +319,7 @@ export async function fetchMonthlyConsumption(
         monthTo: asMonth(to),
     };
 
-    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+    for (const candidate of prefixesFor(params, prefix)) {
         const rows = await descoGet<any[]>(candidate, "getCustomerMonthlyConsumption", query);
         if (!Array.isArray(rows) || rows.length === 0) continue;
 
@@ -294,7 +353,7 @@ export async function fetchRechargeHistory(
         dateTo,
     };
 
-    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+    for (const candidate of prefixesFor(params, prefix)) {
         const rows = await descoGet<any[]>(candidate, "getRechargeHistory", query);
         if (!Array.isArray(rows)) continue;
 

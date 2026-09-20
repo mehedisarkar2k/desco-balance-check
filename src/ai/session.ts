@@ -58,9 +58,20 @@ export function getSession(userId: number): { session: Session; isNew: boolean }
     return { session, isNew: true };
 }
 
+/** A tool result that represents a failure rather than data. */
+function isFailure(value: unknown): boolean {
+    return Boolean(value && typeof value === "object" && "error" in (value as object));
+}
+
 /**
  * Runs `loader` only the first time a key is requested in a session, and
  * returns the stored value afterwards.
+ *
+ * Failures are deliberately not stored. DESCO times out intermittently, and
+ * caching the error would keep serving it for the rest of the session: a user
+ * who asked again a minute later would get the same stale failure even once
+ * DESCO had recovered. Retrying a failed lookup costs one request; caching it
+ * costs the user the whole session.
  */
 export async function cached<T>(
     session: Session,
@@ -72,8 +83,11 @@ export async function cached<T>(
     }
 
     const value = await loader();
-    session.cache.set(key, value);
     session.apiCalls += 1;
+
+    if (!isFailure(value)) {
+        session.cache.set(key, value);
+    }
 
     return value;
 }

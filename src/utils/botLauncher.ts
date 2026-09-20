@@ -1,6 +1,16 @@
 import { Telegraf } from "telegraf";
 
 /**
+ * Set during an intentional shutdown, so the polling loop ending on the way
+ * out is not mistaken for a failure.
+ */
+let shuttingDown = false;
+
+export function markShuttingDown() {
+    shuttingDown = true;
+}
+
+/**
  * Resolves once the bot is connected — NOT when it stops.
  *
  * In long polling mode Telegraf's `launch()` awaits the polling loop, which
@@ -25,10 +35,16 @@ function launchAndWaitForConnection(bot: Telegraf): Promise<void> {
             }
         ).catch((error: any) => {
             if (connected) {
-                // Polling died after a successful start; the promise handed to
-                // the caller has already resolved, so just report it.
+                // Polling died after a successful start, so the promise handed
+                // to the caller has already resolved and nothing is waiting.
+                if (shuttingDown) return;
+
+                // The process would otherwise stay up answering health checks
+                // while receiving no updates at all -- a silent zombie that the
+                // platform has no reason to restart. Exiting hands it back.
                 console.error("❌ Long polling stopped unexpectedly:", error.message);
-                return;
+                console.error("Exiting so the platform restarts a healthy instance.");
+                process.exit(1);
             }
             reject(error);
         });

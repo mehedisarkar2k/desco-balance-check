@@ -7,7 +7,7 @@ import { autoRegisterMiddleware } from "./middleware/autoRegister";
 import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleSubscribe, handleUsage, handleRecharges } from "./handlers/commands";
 import { handleCallbackQuery } from "./handlers/callbacks";
 import { handleTextMessage } from "./handlers/textMessages";
-import { startBotWithRetry } from "./utils/botLauncher";
+import { startBotWithRetry, markShuttingDown } from "./utils/botLauncher";
 import { BOT_COMMANDS } from "./botCommands";
 import { offerVersionAnnouncement } from "./utils/announcer";
 
@@ -104,12 +104,14 @@ bot.on("text", handleTextMessage);
 
         process.once("SIGINT", async () => {
             console.log("🛑 Shutting down gracefully...");
+            markShuttingDown();
             await sendMessage("⏸️ <i>Bot shutting down...</i>", 932626321);
             bot.stop("SIGINT");
             process.exit(0);
         });
         process.once("SIGTERM", async () => {
             console.log("🛑 Shutting down gracefully...");
+            markShuttingDown();
             await sendMessage("⏸️ <i>Bot shutting down...</i>", 932626321);
             bot.stop("SIGTERM");
             process.exit(0);
