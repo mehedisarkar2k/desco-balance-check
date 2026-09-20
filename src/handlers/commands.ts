@@ -43,6 +43,10 @@ export async function handleHelp(ctx: Context) {
 
 ${formatCommandList()}
 
+<b>💬 Just ask:</b>
+You can also type a question instead of using a command — for example
+<i>"koto din cholbe?"</i> or <i>"last 7 days usage koto?"</i>
+
 <b>About Subscriptions:</b>
 When subscribed, you'll receive automatic balance notifications at your chosen times. You can also set a low balance threshold for alerts.
 

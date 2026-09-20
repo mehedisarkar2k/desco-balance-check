@@ -19,6 +19,7 @@ export const CHANGELOG: Record<string, Release> = {
             "⏳ <b>Days-left estimates</b> now follow DESCO's banded tariff, which resets on the 1st, so the figure is no longer pessimistic at month end",
             "⚠️ <b>Low balance alerts</b> can now trigger on days remaining, not just a BDT amount — far more notice to recharge",
             "🔔 <b>Scheduled reminders</b> now fire reliably (they were silently never starting)",
+            "🤖 <b>Just ask</b> — type a question like \"last 7 diner usage koto?\" or \"koto din cholbe?\" instead of remembering commands",
         ],
     },
 };

@@ -4,6 +4,7 @@ import { userSessions } from "./commands";
 import { performBalanceCheck, performOverview } from "../utils/balanceChecker";
 import { refreshSchedules } from "../scheduler";
 import { MIN_OVERVIEW_DAYS, MAX_OVERVIEW_DAYS } from "../utils/overview";
+import { handleAiMessage } from "../ai";
 
 export async function handleTextMessage(ctx: Context) {
     const userId = ctx.from?.id;
@@ -12,7 +13,14 @@ export async function handleTextMessage(ctx: Context) {
     if (!userId || !text) return;
 
     const session = userSessions.get(userId);
-    if (!session) return;
+
+    // No guided flow in progress, so treat it as a question for the assistant.
+    // Setup and update flows keep priority: a bare number mid-flow is an answer
+    // to the question just asked, not a new request.
+    if (!session) {
+        await handleAiMessage(ctx, text);
+        return;
+    }
 
     // Setup flow (for /start)
     if (session.step === "setup_account") {

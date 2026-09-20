@@ -3,6 +3,7 @@ import { sendMessage } from "./bot";
 import { UserService } from "./services/UserService";
 import { bot } from "./bot";
 import { IUser } from "./models/User";
+import { pruneSessions } from "./ai/session";
 import {
     getBalanceReport,
     formatBalanceMessage,
@@ -182,6 +183,15 @@ export async function startScheduler() {
     cron.schedule("15 * * * *", async () => {
         console.log("Running hourly low balance checks...");
         await checkHourlyLowBalance();
+    }, {
+        timezone: process.env.TZ || "Asia/Dhaka"
+    });
+
+    // Idle chat sessions would otherwise accumulate for every user who ever
+    // chatted, since this process runs for weeks at a time.
+    cron.schedule("45 * * * *", () => {
+        const removed = pruneSessions();
+        if (removed > 0) console.log(`Pruned ${removed} idle chat session(s)`);
     }, {
         timezone: process.env.TZ || "Asia/Dhaka"
     });

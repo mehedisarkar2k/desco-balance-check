@@ -207,6 +207,76 @@ export async function fetchDailyConsumption(
     return null;
 }
 
+export interface CustomerInfo {
+    customerName?: string;
+    installationAddress?: string;
+    tariffSolution?: string;
+    sanctionLoad?: number;
+    phaseType?: string;
+    feederName?: string;
+    meterModel?: string;
+    installationDate?: string;
+    SDName?: string;
+}
+
+export interface MonthlyConsumption {
+    /** "YYYY-MM". */
+    month: string;
+    consumedTaka: number;
+    consumedUnit: number;
+    maximumDemand?: number;
+}
+
+/** Registered account details. Contains personal data, so handle with care. */
+export async function fetchCustomerInfo(
+    params: FetchBalanceParams,
+    prefix?: string
+): Promise<CustomerInfo | null> {
+    const query = { accountNo: params.accountNo, meterNo: params.meterNo };
+
+    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+        const data = await descoGet<CustomerInfo>(candidate, "getCustomerInfo", query);
+        if (data) return data;
+    }
+
+    return null;
+}
+
+/** Monthly totals for the last `months` months, oldest first. */
+export async function fetchMonthlyConsumption(
+    params: FetchBalanceParams,
+    months: number,
+    prefix?: string
+): Promise<MonthlyConsumption[] | null> {
+    const now = new Date();
+    const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+    const from = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() - (months - 1), 1));
+    const asMonth = (date: Date) => date.toISOString().slice(0, 7);
+
+    const query = {
+        accountNo: params.accountNo,
+        meterNo: params.meterNo,
+        monthFrom: asMonth(from),
+        monthTo: asMonth(to),
+    };
+
+    for (const candidate of prefix ? [prefix] : API_PREFIXES) {
+        const rows = await descoGet<any[]>(candidate, "getCustomerMonthlyConsumption", query);
+        if (!Array.isArray(rows) || rows.length === 0) continue;
+
+        return rows
+            .map((row) => ({
+                month: row.month,
+                consumedTaka: Number(row.consumedTaka),
+                consumedUnit: Number(row.consumedUnit),
+                maximumDemand: row.maximumDemand ? Number(row.maximumDemand) : undefined,
+            }))
+            .sort((a, b) => a.month.localeCompare(b.month));
+    }
+
+    return null;
+}
+
 /**
  * Recharges in a date range, newest first. Returns an empty array when the
  * account simply had no recharges, and null when the lookup failed.
