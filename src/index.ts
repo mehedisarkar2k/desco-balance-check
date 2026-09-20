@@ -77,7 +77,7 @@ bot.on("text", handleTextMessage);
         console.log("Launching the TG bot with retry logic...");
         await startBotWithRetry(bot);
         await sendMessage("<i>Bot started successfully in " + environment + " mode.</i>");
-        startScheduler();
+        await startScheduler();
 
         console.log(`✅ Bot is running and ready to serve multiple users!`);
 

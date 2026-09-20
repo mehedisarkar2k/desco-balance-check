@@ -97,11 +97,8 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
 
 // Setup user-specific notifications
 async function setupUserNotifications() {
-    // Clear existing tasks
-    scheduledTasks.forEach(task => task.stop());
-    scheduledTasks.clear();
-
-    // Get all unique notification times
+    // Read first, then swap. Tearing the tasks down before this await would
+    // leave a window with no schedule at all while the query is in flight.
     const users = await UserService.getSubscribedUsers();
     const timeUserMap = new Map<string, number[]>();
 
@@ -114,8 +111,21 @@ async function setupUserNotifications() {
         });
     });
 
-    // Create cron jobs for each unique time
+    // Only the difference is applied. Stopping and recreating every task on
+    // each refresh risks destroying a reminder in the moment it comes due, and
+    // each task looks its own users up when it fires, so a task whose time is
+    // unchanged needs no work even when its users changed.
+    for (const [time, task] of scheduledTasks) {
+        if (!timeUserMap.has(time)) {
+            task.stop();
+            scheduledTasks.delete(time);
+            console.log(`🗑️ Unscheduled notifications for ${time}`);
+        }
+    }
+
     timeUserMap.forEach((userIds, time) => {
+        if (scheduledTasks.has(time)) return;
+
         const [hour, minute] = time.split(":");
         const cronExpression = `${minute} ${hour} * * *`;
 
@@ -143,7 +153,10 @@ async function setupUserNotifications() {
 
 // Refresh schedules every hour to pick up new subscriptions
 function scheduleRefresh() {
-    cron.schedule("0 * * * *", async () => {
+    // Deliberately at half past, not on the hour. A rebuild stops and recreates
+    // every task, and notification times are whole minutes that default to :00,
+    // so refreshing at minute 0 could tear down a reminder as it came due.
+    cron.schedule("30 * * * *", async () => {
         console.log("Refreshing notification schedules...");
         await setupUserNotifications();
     }, {
@@ -164,8 +177,9 @@ async function checkHourlyLowBalance() {
 
 // Daily scheduled checks and alerts
 export async function startScheduler() {
-    // Hourly checks for low balance alerts
-    cron.schedule("0 * * * *", async () => {
+    // Hourly checks for low balance alerts, offset from the hour so they don't
+    // hit DESCO at the same instant as the scheduled updates.
+    cron.schedule("15 * * * *", async () => {
         console.log("Running hourly low balance checks...");
         await checkHourlyLowBalance();
     }, {

@@ -1,6 +1,41 @@
 import { Telegraf } from "telegraf";
 
 /**
+ * Resolves once the bot is connected — NOT when it stops.
+ *
+ * In long polling mode Telegraf's `launch()` awaits the polling loop, which
+ * runs for the life of the process, so its promise stays pending forever.
+ * Awaiting it directly means nothing after the launch call ever runs, which
+ * previously left the notification scheduler unstarted. The `onLaunch`
+ * callback fires as soon as the connection is established, so we wait on that
+ * and keep a handler on the original promise to catch a later polling failure.
+ */
+function launchAndWaitForConnection(bot: Telegraf): Promise<void> {
+    return new Promise((resolve, reject) => {
+        let connected = false;
+
+        bot.launch(
+            {
+                dropPendingUpdates: true, // Ignore old updates
+                allowedUpdates: [], // Reset to Telegram's default update types
+            },
+            () => {
+                connected = true;
+                resolve();
+            }
+        ).catch((error: any) => {
+            if (connected) {
+                // Polling died after a successful start; the promise handed to
+                // the caller has already resolved, so just report it.
+                console.error("❌ Long polling stopped unexpectedly:", error.message);
+                return;
+            }
+            reject(error);
+        });
+    });
+}
+
+/**
  * Start bot with retry logic for network resilience
  */
 export async function startBotWithRetry(bot: Telegraf, maxRetries = 5) {
@@ -23,10 +58,7 @@ export async function startBotWithRetry(bot: Telegraf, maxRetries = 5) {
     while (retries < maxRetries) {
         try {
             console.log(`Launching bot... (Attempt ${retries + 1}/${maxRetries})`);
-            await bot.launch({
-                dropPendingUpdates: true, // Ignore old updates
-                allowedUpdates: [], // First launch with no updates
-            });
+            await launchAndWaitForConnection(bot);
             console.log("✅ Bot launched successfully");
             return; // Success!
         } catch (error: any) {
