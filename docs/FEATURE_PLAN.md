@@ -39,7 +39,7 @@ Researched on 20 September 2026 by reading each provider's portal code and exist
 Meter counts are from a July 2026 news report, approximate, and do not sum exactly to the reported national total.
 
 | Provider | Prepaid meters | Verdict | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | DESCO | ~9.2 lakh | Done | |
 | NESCO | ~9.4 lakh | Feasible, next | Customer number only, no login or captcha. HTML scraping with a session cookie and CSRF token at `customer.nesco.gov.bd/pre/panel`. Gives balance, recharge history, monthly usage; no daily data. About ten open-source projects do this; `mdminhazulhaque/python-nesco` is the cleanest reference. |
 | WZPDCL | ~9.1 lakh | Partial | Open JSON API at `api.wzpdcl.gov.bd` (endpoint list is public at `/Help`). Customer info without login was verified. Usage, payment and token endpoints exist but were not tested. Balance appears to need phone + OTP registration. |
@@ -71,6 +71,23 @@ One adapter per provider, each declaring what it supports (balance, daily usage,
 6. WZPDCL, only if users ask.
 
 Not planned without an official partnership: DPDC, BPDB, BREB prepaid.
+
+## Hosting: Render or Heroku
+
+Render has not been sleeping. On 20 Sept the service showed 19 days of unbroken uptime before that day's deploys, and the health check answers in under 0.1 s; a sleeping service takes 30 s or more to wake. What looked like sleep was roughly ten deploys in one day (each restarts the bot), DESCO's slow front-end, and the scheduler that never started before it was fixed.
+
+Moving to Heroku (student pack credit) is still reasonable, because a paid always-on dyno does not depend on the self-ping keep-alive. It is not urgent. Wait a few stable days first.
+
+What the move needs:
+
+- A `Procfile` containing `worker: node dist/index.js`. The bot uses long polling, so it needs no web dyno.
+- An `engines` field in `package.json` pinning Node 24. It is missing today.
+- Yarn 4 on Heroku's buildpack is untested; the first deploy may need a small adjustment.
+- Confirm what the student credit covers. A Basic dyno does not sleep; Eco shares a limited pool of monthly hours.
+- Suspend Render before starting Heroku. Only one instance can poll Telegram, and the bot now exits when it detects a second one, so both running together would crash-loop each other.
+- Heroku restarts dynos about once a day, so the "bot started / shutting down" messages to the admin chat will appear daily unless they are reduced.
+
+Heroku's servers are also outside Bangladesh, so it changes nothing for DESCO's slowness or the NESCO reachability question.
 
 ## Needed before starting
 
