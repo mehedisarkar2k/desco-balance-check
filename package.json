@@ -2,7 +2,7 @@
   "name": "desco-balance-check",
   "packageManager": "yarn@4.5.2",
   "type": "commonjs",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A Telegram bot to check DESCO electricity balance and notify when low.",
   "main": "dist/index.js",
   "author": "Mehedi Hasan Sarkar <mehedisarkar2k@gmail.com>",
