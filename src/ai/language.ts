@@ -5,6 +5,9 @@
  * message: after a few Bangla exchanges, "so, what about the 23?" was answered
  * in Bangla. Deciding it here and stating it in the instructions for that turn
  * makes the rule hold.
+ *
+ * "en" means "not Bangla": the reply follows whatever language the message is
+ * in. Forced to English, "Visa min historik" was answered in English.
  */
 export type ReplyLanguage = "bn" | "en";
 

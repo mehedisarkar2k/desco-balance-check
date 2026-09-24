@@ -437,7 +437,10 @@ function monthLabel(month: string): string {
  */
 function pendingChargeLines(pending: PendingCharges): string[] {
     const months = pending.months.map(monthLabel).join(", ");
-    const amount = `<code>${pending.amountBDT.toFixed(2)} BDT</code>`;
+    // Whole taka per month times the months, the same figures chat gives, so
+    // the two never differ by a paisa of rounding.
+    const perMonth = Math.round(pending.amountBDT / pending.months.length);
+    const amount = `<code>${perMonth * pending.months.length} BDT</code>`;
 
     if (pending.months.length === 1) {
         return [`🧾 <b>Fixed charge due:</b> ${amount} (${months}), taken from your next recharge first`];

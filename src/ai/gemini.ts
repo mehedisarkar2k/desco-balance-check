@@ -83,51 +83,49 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "  readings. Never present it as a single day's usage.",
         "- A day with slabChange had no single rate: say the slab changed that day and give rateBefore and",
         "  rateAfter. Never divide its BDT by its kWh to make up a rate.",
-        "- daysRemaining and runoutDate are a forecast, not a fact. They assume consumption continues at the",
-        "  recent average and price it against the slab rates, including the reset on the 1st. Whenever you",
-        "  give either figure, say in the same breath that it is an estimate based on recent usage and will",
-        "  change if usage changes. Never state it as a certainty or a date power will definitely be cut.",
+        "",
+        "Estimates:",
+        "- Anything about the future is an estimate: days left, the run-out date, how much to recharge, what",
+        "  a recharge buys, future costs. Every reply that gives one says so in the same sentence, with what",
+        "  it is based on ('about 1250 BDT, if you keep using about 6.7 kWh a day'). This holds for a",
+        "  one-line follow-up too. Never state one as certain, or as a date power will definitely be cut.",
+        "- Give estimates in whole taka, with 'about' or '~'. Balances and past figures stay exact.",
+        "- If runwayNote is present and you give both the daily cost and the days left, say why the days",
+        "  left are more than balance divided by the daily cost.",
         "",
         "Money questions:",
         "- How much to recharge or load, for any date, month or trip: call plan_recharge with the last day",
-        "  to cover. How long a given recharge would last: call simulate_recharge.",
+        "  to cover, and reply with only its displayCard token. The card is the whole answer: run-out date,",
+        "  every option, fixed charges, warnings and the assumption. How long a given amount would last:",
+        "  call simulate_recharge.",
+        "- 'safe', 'nirapod' or 'backup' about an amount means safeBDT. Offer it; do not stretch the date.",
         "- Trips (village, holiday, tour): awayFrom is the first day nobody is home; awayUntil is the day",
-        "  before they are back (back on 9 Nov → 2026-11-08). The return date is when they come home, not",
-        "  a possible departure date. Cover past the return: until = the return date plus the days they",
-        "  ask for, or plus 3 days when they say 'safe', 'backup' or 'buffer' without a number. Coming",
-        "  home needs power that day, so never stop at the return date itself.",
+        "  before they are back (back on 9 Nov → 2026-11-08). Cover past the return: until = the return",
+        "  date plus the days they ask for, or plus 3 days if they say 'safe' or 'buffer' about the trip",
+        "  without a number. Coming home needs power that day, so never stop at the return date itself.",
         "- Only when the user says something stays on while away (a fridge, a router), pass awayKwhPerDay:",
-        "  their figure, or 1.2 for a fridge if they gave none. Then say you assumed 1.2, and that the first",
-        "  full day away will show the fridge's real use in their daily usage, so they can ask again with",
-        "  it. Never price time away at the home average. If they mentioned nothing, leave it out.",
-        "- If runsOutWhileAway is present, say it plainly: the balance runs out during the trip.",
-        "- If the departure date is uncertain ('10th, maybe 13th or 14th'), do not ask again, and never ask",
-        "  twice: plan for the later departure, which needs more money, and say that leaving on the earlier",
-        "  date costs a little less. Say that only when the date was uncertain.",
-        "- Use the numbers those tools return, as given. Never calculate a cost, rate or amount yourself,",
-        "  and never scale one month's bill to another month: the tariff is banded, so cost is not",
-        "  proportional to use.",
-        "- The current balance is spent first, including on the rest of this month; the tools already",
-        "  account for that. Do not subtract the balance again.",
-        "- Say when the balance runs out, then give every entry in rechargeOptions, one line each: when to",
-        "  recharge (rechargeBetween) and its suggestedBDT, noting the fixed charges it includes. The months",
-        "  differ by those charges, so leaving one out misleads. Add mainAssumption in one short line.",
-        "  Give howItWasWorkedOut only when the user asks how it was calculated.",
-        "- Fixed monthly charges: every month has one, even a month with no use or no recharge. It is never",
-        "  taken from the balance; the next recharge pays every unpaid month first, before any power. When",
-        "  an option has fixedChargesLeftForTheNextRecharge, or a result has fixedChargesDueNextRecharge,",
-        "  say so in one line with the months and the total, so the user is not surprised by a small",
-        "  recharge. There is no late fee. Pass on any warning as given.",
-        "- forecastByMonth is energy only (energyCostBDT); the fixed charges are never part of it.",
-        "- If asked how the current balance fits in, use forecastByMonth: paidByBalanceBDT is what the",
-        "  balance covers in each month and leftForRechargeBDT what the recharge must cover. The balance",
-        "  pays for the rest of this month first, then carries into the next.",
+        "  their figure, or 1.2 for a fridge if they gave none. If they mentioned nothing, leave it out.",
+        "- If the departure date is uncertain ('10th, maybe 13th or 14th'), do not ask: plan for the later",
+        "  date, which needs more, and pass earlierDeparturePossible.",
+        "- Follow-ups about a plan: answer from the plan's fields, as given. Never calculate a cost, rate or",
+        "  amount yourself; the tariff is banded, so cost is not proportional to use. For another date or",
+        "  amount, call the tool again.",
+        "- 'Just the energy', 'without fixed charges': energyOnlyBDT, VAT included.",
+        "- The balance is spent first, then the recharge covers the days after it runs out. The amounts",
+        "  already allow for that; never subtract the balance again.",
+        "- Fixed charges: every month has one, even with no use or no recharge. It is never taken from the",
+        "  balance; the next recharge pays every unpaid month first, before any power. Paying now or later",
+        "  costs the same in total: only which recharge pays each month's charge changes. No late fee.",
+        "- Give howItWasWorkedOut only when the user asks how it was calculated.",
         "",
         "Conversation:",
         "- This is an ongoing chat. Read a short follow-up against what was just discussed. If the previous",
         "  messages were about particular dates or a particular period, then 'tariff koto?', 'ar oi din?',",
         "  'eita koto kore?' and similar refer to those same dates, not to the month as a whole.",
         "- 'koto kore keteche' / 'koto kore' asks for the rate per unit (BDT per kWh), not the total cost.",
+        "- 'history', 'itihash', 'record' or 'log' on its own, in any language, means daily usage: call",
+        "  get_daily_usage. Recharge history only when they say recharge, top-up, load or payment.",
+        "- If a period has no recharges, say so and give the last one before it (lastRechargeBeforeThis).",
         "- Answer the question asked and stop. Do not repeat a full breakdown the user has already been",
         "  given; give the specific figure, and at most one line of context.",
         "",
@@ -135,7 +133,9 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         // whatever language the earlier turns happened to be in.
         language === "bn"
             ? "Language: the user's latest message is in Bangla or Banglish. Reply in Bangla script (বাংলা), never in Banglish or English."
-            : "Language: the user's latest message is in English. Reply in English, even if earlier messages were in Bangla.",
+            : "Language: the user's latest message is not in Bangla. Reply in the language it is written in: " +
+              "English, or another language such as German or Swedish if it is clearly that. If it is " +
+              "Bangla typed in English letters, reply in Bangla script. Never follow the language of earlier messages.",
         // Converting to Bangla numerals is where figures went wrong: the
         // month's 1112.15 BDT came out as ১১২.১৫.
         "Keep numbers, dates, 'kWh' and 'BDT' as they are. Write every number with the digits 0-9 exactly as",
@@ -149,6 +149,7 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "- To show more than 3 days of figures, put the displayTable token from get_daily_usage on its own",
         "  line, exactly as given (for example [[BLOCK_2]]). The bot replaces it with an aligned table of",
         "  date, kWh, BDT and tariff. Do not also write those rows yourself.",
+        "- A displayCard token goes on its own line exactly as given, like displayTable.",
         "- When the user asks to be sent their reminder or an update now, call show_balance_update and put",
         "  its displayMessage token on its own line. You can send it; do not say you cannot. Add at most one",
         "  short line of your own around it.",
@@ -181,16 +182,19 @@ const FALLBACK = {
 };
 
 /**
- * The language instruction, attached to the user's own message for the turn.
+ * The language and estimate instructions, attached to the user's own message for the turn.
  *
  * The same rule in the system instructions was not enough: after a Bangla
  * exchange, "thank you. keep me daily updated" was still answered in Bangla.
  * An instruction inside the latest user turn is the one the model weighs most.
  */
-function languageDirective(language: ReplyLanguage): string {
-    return language === "bn"
-        ? "[Reply in Bangla script (বাংলা).]"
-        : "[Reply in English.]";
+function turnDirective(language: ReplyLanguage): string {
+    const reply = language === "bn"
+        ? "Reply in Bangla script (বাংলা)."
+        : "Reply in the language of this message, not Bangla.";
+    // Here for the same reason as the language: in the system instructions
+    // alone, a one-line follow-up gave "about 1250 BDT" with no assumption.
+    return `[${reply} Any estimate you give says what it assumes.]`;
 }
 
 /**
@@ -205,7 +209,9 @@ async function rewriteInLanguage(
     language: ReplyLanguage,
     systemInstructionText: string
 ): Promise<string | null> {
-    const target = language === "bn" ? "Bangla script (বাংলা)" : "English";
+    const target = language === "bn"
+        ? "Bangla script (বাংলা)"
+        : "the language of my latest message (English unless it is clearly another language), not Bangla";
     const response = await ai.models.generateContent({
         model: MODEL,
         contents: [
@@ -237,7 +243,7 @@ async function rewriteInLanguage(
 export async function askGemini(
     message: string,
     session: Session,
-    ctx: Omit<ToolContext, "session">,
+    ctx: Omit<ToolContext, "session" | "language">,
     language: ReplyLanguage
 ): Promise<AiReply> {
     const ai = getClient();
@@ -245,7 +251,7 @@ export async function askGemini(
 
     const contents: Content[] = [
         ...session.history,
-        { role: "user", parts: [{ text: message }, { text: languageDirective(language) }] },
+        { role: "user", parts: [{ text: message }, { text: turnDirective(language) }] },
     ];
 
     const instructions = systemInstruction(ctx.role, language);
@@ -256,6 +262,8 @@ export async function askGemini(
     };
 
     let retriedEmpty = false;
+    /** Recharge card tokens produced this turn. */
+    const cards: string[] = [];
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         const response = await ai.models.generateContent({ model: MODEL, contents, config });
@@ -273,6 +281,12 @@ export async function askGemini(
 
         if (calls.length === 0) {
             let text = response.text?.trim() || FALLBACK.unclear[language];
+
+            // A recharge card is the whole answer. Around it the model restated
+            // the card in its own words, in Bangla digits, or trailed off with
+            // half a sentence; so when it used a card, only the cards are sent.
+            const shown = cards.filter((token) => text.includes(token));
+            if (shown.length > 0) text = shown.join("\n\n");
 
             if (!isInLanguage(text, language)) {
                 const rewritten = await rewriteInLanguage(ai, contents, text, language, instructions);
@@ -308,7 +322,9 @@ export async function askGemini(
                 const name = call.name ?? "";
                 toolsUsed.push(name);
 
-                const result = await executeTool(name, call.args, { ...ctx, session });
+                const result = await executeTool(name, call.args, { ...ctx, session, language });
+                const card = (result as { displayCard?: unknown } | null)?.displayCard;
+                if (typeof card === "string") cards.push(card);
                 return { functionResponse: { name, response: { result } } };
             })
         );
