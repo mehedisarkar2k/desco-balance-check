@@ -215,6 +215,91 @@ export function forecastThrough(days: Iterable<DaySpend>, until: string, balance
     return { months: [...byMonth.values()], totalBDT: total, balanceRunsOutOn: runsOut };
 }
 
+/** A stretch of days at one slab within one month, for showing how a balance is spent. */
+export interface SpendPhase {
+    from: string;
+    to: string;
+    kwh: number;
+    costBDT: number;
+    /** Balance left after the phase; zero or less means it ran out in it. */
+    balanceAfter: number;
+}
+
+export interface RechargeTimeline {
+    phases: SpendPhase[];
+    /** The balance just before the recharge is added. */
+    balanceBeforeRecharge: number;
+    /** The day the phases reach when the recharge is added, i.e. the first day it pays for. */
+    rechargeBefore: string | null;
+    /** The day the balance, recharge included, is used up; null if it lasts past the horizon. */
+    runsOutOn: string | null;
+    /** The day the balance alone would have been used up, if before the recharge. */
+    runsOutBeforeRecharge: string | null;
+}
+
+/**
+ * Day by day from tomorrow: the balance is spent, the recharge's energy
+ * credit is added on `rechargeOn`, and the days are grouped into phases that
+ * break at a month, at the recharge, and where the month crosses a slab. The
+ * lifeline boundary (50) is not a break: crossing it re-prices the month's
+ * earlier units, so the days either side of it are not at two clean rates.
+ */
+export function rechargeTimeline(
+    days: Iterable<DaySpend>,
+    balance: number,
+    credit: number,
+    rechargeOn: string,
+    thresholds: number[],
+    maxDays = 400
+): RechargeTimeline {
+    const breaks = thresholds.filter((t) => t > 50);
+    const slabOf = (units: number) => breaks.filter((t) => units > t).length;
+
+    let remaining = balance;
+    let applied = false;
+    let balanceBeforeRecharge = balance;
+    let rechargeBefore: string | null = null;
+    let runsOutOn: string | null = null;
+    let runsOutBeforeRecharge: string | null = null;
+    const phases: SpendPhase[] = [];
+    let current: SpendPhase | null = null;
+    let currentKey = "";
+    let count = 0;
+
+    for (const day of days) {
+        if (!applied && day.date >= rechargeOn) {
+            applied = true;
+            balanceBeforeRecharge = remaining;
+            rechargeBefore = day.date;
+            remaining += credit;
+        }
+
+        const key = `${day.month}|${applied}|${slabOf(day.units)}`;
+        if (!current || key !== currentKey) {
+            current = { from: day.date, to: day.date, kwh: 0, costBDT: 0, balanceAfter: remaining };
+            currentKey = key;
+            phases.push(current);
+        }
+
+        remaining -= day.cost;
+        current.to = day.date;
+        current.kwh += day.kwh;
+        current.costBDT += day.cost;
+        current.balanceAfter = remaining;
+
+        if (day.cost > 0 && remaining <= 0) {
+            if (applied) {
+                runsOutOn = day.date;
+                break;
+            }
+            if (!runsOutBeforeRecharge) runsOutBeforeRecharge = day.date;
+        }
+        if (++count >= maxDays) break;
+    }
+
+    return { phases, balanceBeforeRecharge, rechargeBefore, runsOutOn, runsOutBeforeRecharge };
+}
+
 /** The day a balance is used up, reading as many days as it takes. */
 export function runsOutOn(days: Iterable<DaySpend>, balance: number, maxDays = 400): string | null {
     let remaining = balance;

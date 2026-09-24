@@ -3,17 +3,16 @@ import type { FunctionDeclaration } from "@google/genai";
 import { UserService } from "../services/UserService";
 import { User } from "../models/User";
 import { fetchCustomerInfo, fetchMonthlyConsumption, fetchDailyConsumption } from "../desco";
-import { buildMonthCurves, describeTariff } from "../domain/tariff";
+import { SlabSchedule, buildMonthCurves, describeTariff, referenceCurve, slabSchedule } from "../domain/tariff";
 import { monthToDateUnits, spendDays } from "../domain/runway";
 import {
     PendingCharges,
     RechargeTerms,
-    chargesFor,
-    creditFor,
     forecastThrough,
     monthsAfter,
     monthsOwed,
     nextMonth,
+    rechargeTimeline,
     runsOutOn,
 } from "../domain/recharge";
 import {
@@ -31,7 +30,7 @@ import { staleAsOf } from "../descoStore";
 import { nowInBillingZone, shiftDate } from "../utils/dates";
 import { parseTimes } from "../utils/times";
 import type { ReplyLanguage } from "./language";
-import { CardOption, renderRechargeCard } from "./rechargeCard";
+import { CardOption, renderRechargeCard, renderSimulationCard } from "./rechargeCard";
 
 export type Role = "user" | "admin";
 
@@ -195,6 +194,8 @@ interface ProjectionInputs {
     days: (away?: Away | null, scale?: number) => Iterable<import("../domain/runway").DaySpend>;
     terms: RechargeTerms;
     pending: PendingCharges | null;
+    /** The slabs future months are priced with, for showing the rates. */
+    slabs: SlabSchedule | null;
     freshnessSources: unknown[];
 }
 
@@ -228,6 +229,10 @@ async function projectionInputs(params: { accountNo?: string; meterNo?: string }
         },
         terms,
         pending,
+        slabs: (() => {
+            const curve = referenceCurve(buildMonthCurves(rows), data.readingTime.slice(0, 7));
+            return curve ? slabSchedule(curve) : null;
+        })(),
         freshnessSources: [data, rows, recharges],
     };
 }
@@ -579,14 +584,22 @@ const TOOLS: Record<string, Tool> = {
         declaration: {
             name: "simulate_recharge",
             description:
-                "How long the power would last if the user recharged a given amount today: the energy credit the " +
-                "amount buys after VAT and the fixed monthly charges it pays first, and the new run-out date " +
-                "compared with not recharging. Can include days away with no use. Use for 'if I recharge X, how " +
-                "long will it last' questions.",
+                "What recharging a given amount on a given day would do: the fixed monthly charges and VAT it pays " +
+                "first, the power it buys, and a day-by-day, slab-by-slab breakdown of how the balance and the " +
+                "recharge are spent until they run out. The fixed charges depend on the month the recharge is " +
+                "made in, so pass rechargeOn whenever the user names a day. Returns a displayCard token with the " +
+                "breakdown written out. Use for 'if I recharge X (on day D), how long will it last' and for any " +
+                "request to show the calculation or a tariff-wise breakdown.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
                     amountBDT: { type: Type.NUMBER, description: "Amount the user would pay, in BDT." },
+                    rechargeOn: {
+                        type: Type.STRING,
+                        description:
+                            "Optional. Day the recharge would be made, YYYY-MM-DD; today if left out. '1 October' " +
+                            "is 2026-10-01. A recharge in a new month pays that month's fixed charge first.",
+                    },
                     awayFrom: {
                         type: Type.STRING,
                         description:
@@ -619,41 +632,80 @@ const TOOLS: Record<string, Tool> = {
             }
 
             const today = todayInBillingZone();
+            const rechargeOn = String(args?.rechargeOn ?? "").trim() || today;
+            if (!isDate(rechargeOn)) return { error: "rechargeOn must be a date in YYYY-MM-DD format." };
+            if (rechargeOn < today) return { error: "rechargeOn cannot be in the past." };
+            if (rechargeOn > shiftDate(today, 120)) return { error: "rechargeOn must be within 120 days." };
+
             const away = parseAway(args, today);
             if (away && "error" in away) return away;
 
             const inputs = await projectionInputs(params);
             if ("error" in inputs) return inputs;
 
+            // The charges follow the month the recharge is made in. Priced as
+            // if made today, "500 on 1 October" skipped October's charge and
+            // bought 479 of power instead of 310.
             const { terms } = inputs;
-            const thisMonth = today.slice(0, 7);
-            const paysFor = terms.monthlyChargeBDT !== null ? monthsOwed(terms, thisMonth) : [];
-            const charges = Math.min(amount, chargesFor(terms, thisMonth));
-            const credit = creditFor(terms, amount, thisMonth);
-            const before = runsOutOn(inputs.days(away), inputs.balance);
-            const after = runsOutOn(inputs.days(away), inputs.balance + credit);
-            const extraDays = before && after
-                ? Math.round((Date.parse(after) - Date.parse(before)) / 86_400_000)
-                : null;
+            const month = rechargeOn.slice(0, 7);
+            const paysFor = terms.monthlyChargeBDT !== null ? monthsOwed(terms, month) : [];
+            const chargeTotal = Math.min(amount, paysFor.length * chargePerMonth(terms));
+            const vat = Math.round(Math.max(0, amount - chargeTotal) * (1 - terms.energyShare));
+            const power = Math.max(0, amount - chargeTotal - vat);
 
-            const warning = credit <= 0 && paysFor.length > 0
+            const timeline = rechargeTimeline(
+                inputs.days(away), inputs.balance, power, rechargeOn, inputs.slabs?.thresholds ?? []
+            );
+            const without = runsOutOn(inputs.days(away), inputs.balance);
+            const withRecharge = timeline.runsOutOn;
+            const extraDays = without && withRecharge
+                ? Math.round((Date.parse(withRecharge) - Date.parse(without)) / 86_400_000)
+                : null;
+            const beforeRecharge = timeline.rechargeBefore;
+            const phases = timeline.phases;
+
+            const warning = power <= 0 && paysFor.length > 0
                 ? `${amount} BDT does not cover the fixed charges owed (${paysFor.length * chargePerMonth(terms)} BDT ` +
                   "for " + paysFor.join(", ") + "), so it adds no power. DESCO does not say how it treats a recharge " +
                   "smaller than the charges owed; advise recharging well above them."
                 : arrearsNote(paysFor, terms);
 
-            return withFreshness({
+            const card = renderSimulationCard({
+                language: ctx.language,
+                today,
                 amountBDT: amount,
-                // Whole taka: these are estimates, and paisa made them read as exact.
-                energyCreditBDT: Math.round(credit),
-                fixedChargesPaid: { ...describeCharges(paysFor, terms), takenFromThisAmountBDT: Math.round(charges) },
-                vatLessRebateBDT: Math.round(Math.max(0, amount - charges - credit)),
+                rechargeOn,
+                away,
+                balanceBDT: inputs.balance,
+                before: beforeRecharge ? phases.filter((p) => p.from < beforeRecharge) : phases,
+                after: beforeRecharge ? phases.filter((p) => p.from >= beforeRecharge) : [],
+                balanceBeforeRecharge: timeline.balanceBeforeRecharge,
+                charges: { months: paysFor, totalBDT: chargeTotal },
+                vatBDT: vat,
+                powerBDT: power,
+                runsOutOn: withRecharge,
+                runsOutWithout: without,
+                runsOutBeforeRecharge: timeline.runsOutBeforeRecharge,
+                slabs: inputs.slabs,
+                kwhPerDay: inputs.kwhPerDay,
+                usageWindowDays: USAGE_WINDOW_DAYS,
+                savedCopyAsOf: savedCopyAsOf(...inputs.freshnessSources),
+            });
+
+            // Whole taka: these are estimates, and paisa made them read as exact.
+            return withFreshness({
+                displayCard: registerDisplay(ctx.session, card),
+                amountBDT: amount,
+                rechargeOn,
+                fixedChargesPaid: describeCharges(paysFor, terms),
+                vatBDT: vat,
+                powerBDT: power,
                 ...(warning ? { warning } : {}),
                 ...(away ? { awayFrom: away.from, awayUntil: away.until, awayKwhPerDay: away.kwhPerDay } : {}),
                 balanceNowBDT: inputs.balance,
-                balanceAfterBDT: Math.round(inputs.balance + credit),
-                lastsUntilWithoutRecharge: before,
-                lastsUntilWithRecharge: after ?? "more than 400 days",
+                lastsUntilWithoutRecharge: without,
+                lastsUntilWithRecharge: withRecharge ?? "more than 400 days",
+                ...(timeline.runsOutBeforeRecharge ? { runsOutBeforeTheRecharge: timeline.runsOutBeforeRecharge } : {}),
                 extraDays,
                 ...rechargeAssumptions(inputs, away),
             }, ...inputs.freshnessSources);

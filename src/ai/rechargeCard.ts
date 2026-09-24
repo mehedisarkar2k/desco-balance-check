@@ -272,3 +272,165 @@ function renderEn(input: CardInput): string {
 export function renderRechargeCard(input: CardInput): string {
     return input.language === "bn" ? renderBn(input) : renderEn(input);
 }
+
+export interface SimulationPhase {
+    from: string;
+    to: string;
+    kwh: number;
+    costBDT: number;
+    balanceAfter: number;
+}
+
+export interface SimulationInput {
+    language: ReplyLanguage;
+    today: string;
+    amountBDT: number;
+    rechargeOn: string;
+    away: { from: string; until: string; kwhPerDay: number } | null;
+    balanceBDT: number;
+    /** Phases before the recharge, then those after it. */
+    before: SimulationPhase[];
+    after: SimulationPhase[];
+    balanceBeforeRecharge: number;
+    charges: CardCharges;
+    vatBDT: number;
+    powerBDT: number;
+    runsOutOn: string | null;
+    runsOutWithout: string | null;
+    runsOutBeforeRecharge: string | null;
+    /** The month's slabs, from the readings, for the rates line. */
+    slabs: { thresholds: number[]; rates: number[] } | null;
+    kwhPerDay: number;
+    usageWindowDays: number;
+    savedCopyAsOf: string | null;
+}
+
+/** Phases shown before the rest are summed into one line, so a large amount stays readable. */
+const MAX_PHASES_SHOWN = 8;
+
+function range(from: string, to: string, language: ReplyLanguage): string {
+    if (from === to) return day(from, language);
+    const start = from.slice(0, 7) === to.slice(0, 7) ? String(parts(from).day) : day(from, language);
+    return `${start}–${day(to, language)}`;
+}
+
+function rate(phase: SimulationPhase): string {
+    return phase.kwh > 0 ? (phase.costBDT / phase.kwh).toFixed(2) : "0";
+}
+
+function slabsLine(slabs: SimulationInput["slabs"], language: ReplyLanguage): string | null {
+    if (!slabs || slabs.rates.length === 0) return null;
+    const { thresholds, rates } = slabs;
+    const bn = language === "bn";
+
+    const steps = rates.map((r, i) => {
+        if (i === rates.length - 1) {
+            return i === 0 ? `${r.toFixed(2)}` : bn ? `${thresholds[i - 1]}-এর পর ${r.toFixed(2)}` : `${r.toFixed(2)} after ${thresholds[i - 1]}`;
+        }
+        return bn ? `${thresholds[i]} ইউনিট পর্যন্ত ${r.toFixed(2)}` : `${r.toFixed(2)} up to ${thresholds[i]} units`;
+    });
+
+    // The lifeline: past 50 units the whole month is billed at the next rate.
+    const lifeline = thresholds[0] === 50 && rates.length > 1
+        ? bn
+            ? `; 50 পার হলে আগের ইউনিটগুলোও ${rates[1].toFixed(2)} ধরা হয়`
+            : `; past 50, the earlier units are billed at ${rates[1].toFixed(2)} too`
+        : "";
+
+    return bn
+        ? `রেট (আপনার মিটারের রিডিং থেকে, প্রতি kWh): ${steps.join(", ")}${lifeline}। প্রতি মাসের 1 তারিখে আবার শুরু।`
+        : `Rates (from your meter's readings, per kWh): ${steps.join(", ")}${lifeline}. They start again on the 1st.`;
+}
+
+function phaseLines(phases: SimulationPhase[], language: ReplyLanguage): string[] {
+    const bn = language === "bn";
+    const shown = phases.slice(0, MAX_PHASES_SHOWN);
+    const lines = shown.map((p) => {
+        const left = p.balanceAfter > 0
+            ? (bn ? `বাকি ~${Math.round(p.balanceAfter)}` : `~${Math.round(p.balanceAfter)} left`)
+            : (bn ? "শেষ" : "used up");
+        return bn
+            ? `• ${range(p.from, p.to, "bn")}: ~${Math.round(p.kwh)} kWh, ~${Math.round(p.costBDT)} টাকা (গড় ${rate(p)}/kWh) → ${left}`
+            : `• ${range(p.from, p.to, "en")}: ~${Math.round(p.kwh)} kWh, ~${Math.round(p.costBDT)} BDT (avg ${rate(p)}/kWh) → ${left}`;
+    });
+
+    const rest = phases.slice(MAX_PHASES_SHOWN);
+    if (rest.length > 0) {
+        const last = rest[rest.length - 1];
+        const kwh = rest.reduce((s, p) => s + p.kwh, 0);
+        const cost = rest.reduce((s, p) => s + p.costBDT, 0);
+        lines.push(
+            bn
+                ? `• ${range(rest[0].from, last.to, "bn")}: ~${Math.round(kwh)} kWh, ~${Math.round(cost)} টাকা`
+                : `• ${range(rest[0].from, last.to, "en")}: ~${Math.round(kwh)} kWh, ~${Math.round(cost)} BDT`
+        );
+    }
+    return lines;
+}
+
+/**
+ * What a recharge of a given amount on a given day does, step by step: the
+ * balance spent at this month's rate, the recharge less its fixed charges and
+ * VAT, and the power it buys spent at the new month's slabs. Asked for this
+ * breakdown, the model listed its inputs and never showed the arithmetic.
+ */
+export function renderSimulationCard(input: SimulationInput): string {
+    const bn = input.language === "bn";
+    const d = (date: string) => day(date, input.language);
+    const when = input.rechargeOn === input.today ? (bn ? "আজ" : "today") : d(input.rechargeOn);
+    const lines: string[] = [
+        bn
+            ? `<b>💡 ${when} ${input.amountBDT} টাকা রিচার্জ করলে</b>`
+            : `<b>💡 If you recharge ${input.amountBDT} BDT ${input.rechargeOn === input.today ? "today" : `on ${when}`}</b>`,
+    ];
+    if (input.away) {
+        lines.push(bn
+            ? `🧳 বাইরে: ${d(input.away.from)} – ${d(input.away.until)}`
+            : `🧳 Away: ${d(input.away.from)} – ${d(input.away.until)}`);
+    }
+    lines.push("", bn ? `এখনকার ব্যালেন্স: ${Math.floor(input.balanceBDT)} টাকা` : `Balance now: ${Math.floor(input.balanceBDT)} BDT`);
+
+    lines.push(...phaseLines(input.before, input.language));
+
+    const charges = input.charges.months.length > 0
+        ? bn
+            ? `${monthNamesOfBn(input.charges.months)} ফিক্সড চার্জ ${input.charges.totalBDT} ও `
+            : `the fixed charge for ${monthNames(input.charges.months, "en")} (${input.charges.totalBDT}) and `
+        : "";
+    const after = Math.round(Math.max(0, input.balanceBeforeRecharge) + input.powerBDT);
+    lines.push(bn
+        ? `• ${when} রিচার্জ ${input.amountBDT}: ${charges}VAT ~${input.vatBDT} বাদে বিদ্যুৎ ~${input.powerBDT} → ব্যালেন্স ~${after}`
+        : `• Recharge ${input.amountBDT} ${input.rechargeOn === input.today ? "today" : `on ${when}`}: less ${charges}VAT ~${input.vatBDT}, ` +
+          `~${input.powerBDT} of power → balance ~${after}`);
+
+    lines.push(...phaseLines(input.after, input.language));
+
+    lines.push("");
+    if (input.runsOutBeforeRecharge) {
+        lines.push(bn
+            ? `⚠️ রিচার্জের আগেই ${d(input.runsOutBeforeRecharge)} ব্যালেন্স শেষ হবে। তার আগে রিচার্জ করুন।`
+            : `⚠️ The balance runs out on ${d(input.runsOutBeforeRecharge)}, before this recharge. Recharge before then.`);
+    }
+    const without = input.runsOutWithout
+        ? (bn ? ` (রিচার্জ ছাড়া ${d(input.runsOutWithout)})` : ` (without it, ${d(input.runsOutWithout)})`)
+        : "";
+    lines.push(input.runsOutOn
+        ? (bn ? `<b>শেষ হবে আনুমানিক ${d(input.runsOutOn)}</b>${without}` : `<b>Runs out about ${d(input.runsOutOn)}</b>${without}`)
+        : (bn ? "<b>1 বছরের বেশি চলবে</b>" : "<b>Lasts more than a year</b>"));
+
+    const rates = slabsLine(input.slabs, input.language);
+    lines.push("");
+    if (rates) lines.push(`<i>${rates}</i>`);
+    lines.push(bn
+        ? `<i>অনুমান: বাসায় দিনে ~${input.kwhPerDay.toFixed(1)} kWh (গত ${input.usageWindowDays} দিনের গড়)। ` +
+          "রিচার্জের তারিখে রেট বদলায় না; রেট নির্ভর করে কোন দিন বিদ্যুৎ খরচ হচ্ছে তার উপর।</i>"
+        : `<i>Estimate: ~${input.kwhPerDay.toFixed(1)} kWh a day at home (your last ${input.usageWindowDays} days' average). ` +
+          "The day you recharge does not change the rate; the day the power is used does.</i>");
+    if (input.savedCopyAsOf) {
+        lines.push(bn
+            ? `<i>⚠️ DESCO এখন সাড়া দিচ্ছে না, তাই এটা ${input.savedCopyAsOf}-এর সংরক্ষিত ডেটা থেকে।</i>`
+            : `<i>⚠️ DESCO is not responding right now, so this uses saved data from ${input.savedCopyAsOf}.</i>`);
+    }
+
+    return lines.join("\n");
+}

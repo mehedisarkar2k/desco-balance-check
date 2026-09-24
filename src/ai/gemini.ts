@@ -13,6 +13,9 @@ const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 /** Ceiling on tool round trips, so a model that keeps calling tools terminates. */
 const MAX_TOOL_ROUNDS = 6;
 
+/** Times an empty reply is asked again. One nudged retry still came back empty now and then. */
+const MAX_EMPTY_RETRIES = 2;
+
 let client: GoogleGenAI | null = null;
 
 export function isAiConfigured(): boolean {
@@ -96,8 +99,16 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "Money questions:",
         "- How much to recharge or load, for any date, month or trip: call plan_recharge with the last day",
         "  to cover, and reply with only its displayCard token. The card is the whole answer: run-out date,",
-        "  every option, fixed charges, warnings and the assumption. How long a given amount would last:",
-        "  call simulate_recharge.",
+        "  every option, fixed charges, warnings and the assumption.",
+        "- What a given amount would do or how long it would last: call simulate_recharge, with rechargeOn",
+        "  whenever the user names the day ('1 octber e 500' → 2026-10-01), and reply with only its",
+        "  displayCard token. Its card shows the whole calculation, slab by slab.",
+        "- Asked for the breakdown, the calculation, 'hiseb', 'tariff wise' or why a figure is what it is:",
+        "  call simulate_recharge. For a plan, use its suggestedBDT and the first day of the window the user",
+        "  chose (the first option if they did not). Never explain the calculation from memory.",
+        "- When a recharge is made never changes the rate of any kWh: the rate depends on the day the power",
+        "  is used. Recharging in a new month only changes which fixed charges it pays. Never say recharging",
+        "  after the 1st makes the money last longer.",
         "- 'safe', 'nirapod' or 'backup' about an amount means safeBDT. Offer it; do not stretch the date.",
         "- Trips (village, holiday, tour): awayFrom is the first day nobody is home; awayUntil is the day",
         "  before they are back (back on 9 Nov → 2026-11-08). Cover past the return: until = the return",
@@ -116,7 +127,7 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "- Fixed charges: every month has one, even with no use or no recharge. It is never taken from the",
         "  balance; the next recharge pays every unpaid month first, before any power. Paying now or later",
         "  costs the same in total: only which recharge pays each month's charge changes. No late fee.",
-        "- Give howItWasWorkedOut only when the user asks how it was calculated.",
+        "- howItWasWorkedOut is background for you. Quote it only if asked about the method in general.",
         "",
         "Conversation:",
         "- This is an ongoing chat. Read a short follow-up against what was just discussed. If the previous",
@@ -197,6 +208,13 @@ function turnDirective(language: ReplyLanguage): string {
     return `[${reply} Any estimate you give says what it assumes.]`;
 }
 
+const EMPTY_REPLY_NUDGE: Content = {
+    role: "user",
+    parts: [{
+        text: "[Your reply was empty. Answer the user's latest message now, calling a tool if it needs figures.]",
+    }],
+};
+
 /**
  * Asks once for the same reply in the right language. A safety net for when
  * the model follows the conversation's earlier language instead of the
@@ -261,19 +279,27 @@ export async function askGemini(
         temperature: 0.3,
     };
 
-    let retriedEmpty = false;
+    let emptyRetries = 0;
+    let nudgeEmpty = false;
     /** Recharge card tokens produced this turn. */
     const cards: string[] = [];
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-        const response = await ai.models.generateContent({ model: MODEL, contents, config });
+        // The retry after an empty reply carries a nudge. Sent unchanged, it
+        // came back empty again: after the bot asked "how much?", the answer
+        // "1 october e 500" got the fallback twice. The nudge is not kept in
+        // the history.
+        const request = nudgeEmpty ? [...contents, EMPTY_REPLY_NUDGE] : contents;
+        nudgeEmpty = false;
+        const response = await ai.models.generateContent({ model: MODEL, contents: request, config });
 
         const calls = response.functionCalls ?? [];
 
         // Now and then the model returns neither text nor a tool call, and
-        // "my balances" got the fallback reply. Asking again once answers it.
-        if (calls.length === 0 && !response.text?.trim() && !retriedEmpty) {
-            retriedEmpty = true;
+        // "my balances" got the fallback reply. Asking again answers it.
+        if (calls.length === 0 && !response.text?.trim() && emptyRetries < MAX_EMPTY_RETRIES) {
+            emptyRetries += 1;
+            nudgeEmpty = true;
             console.warn(`Empty reply (finish: ${response.candidates?.[0]?.finishReason ?? "unknown"}); asking again`);
             round -= 1;
             continue;

@@ -266,6 +266,34 @@ export function describeTariff(curve: MonthCurve): TariffBreakdown | null {
     };
 }
 
+/** Where Bangladesh's residential slabs start, in kWh a month. */
+const STANDARD_SLABS = [50, 75, 200, 300, 400, 600];
+
+export interface SlabSchedule {
+    /** kWh a month at which each rate after the first starts. One fewer than `rates`. */
+    thresholds: number[];
+    rates: number[];
+}
+
+/**
+ * The slabs as a person would state them: "4.63 up to 50 units, 5.26 up to
+ * 75, then 8.50". The bands found in the readings end and start at whatever
+ * readings happened to fall near a boundary (43.55 and 51.05 kWh), so each
+ * boundary is taken as the standard slab nearest the gap between them.
+ */
+export function slabSchedule(curve: MonthCurve): SlabSchedule | null {
+    const bands = deriveBands(curve);
+    if (bands.length === 0) return null;
+
+    const thresholds = bands.slice(1).map((band, i) => {
+        const gap = (bands[i].toKwh + band.fromKwh) / 2;
+        const nearest = STANDARD_SLABS.reduce((a, b) => (Math.abs(b - gap) < Math.abs(a - gap) ? b : a));
+        return Math.abs(nearest - gap) <= Math.max(5, gap * 0.15) ? nearest : Math.round(gap);
+    });
+
+    return { thresholds, rates: bands.map((band) => band.ratePerKwh) };
+}
+
 /**
  * The curve to price a *future* month with.
  *

@@ -43,6 +43,8 @@ export interface DaySpend {
     month: string;
     kwh: number;
     cost: number;
+    /** The month's running total in kWh after this day, which decides its slab. */
+    units: number;
 }
 
 /**
@@ -105,7 +107,7 @@ export function spendDays(
             const date = cursor.toISOString().slice(0, 10);
             const kwh = kwhOn?.(date) ?? kwhPerDay;
             if (!(kwh > 0)) {
-                yield { date, month, kwh: 0, cost: 0 };
+                yield { date, month, kwh: 0, cost: 0, units };
                 continue;
             }
 
@@ -114,7 +116,7 @@ export function spendDays(
             if (!(cost > 0)) return;
 
             units += kwh;
-            yield { date, month, kwh, cost };
+            yield { date, month, kwh, cost, units };
         }
     })();
 }
