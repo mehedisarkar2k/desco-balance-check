@@ -42,8 +42,10 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         `Now: ${today} ${time}, Dhaka time. Yesterday was ${yesterday}.`,
         "",
         "Answer questions about the user's electricity: balance, how long it will last, daily and monthly",
-        "consumption, and recharge history. Always call a tool to get real figures. Never invent numbers,",
-        "and if a tool returns an error, say plainly what could not be fetched.",
+        "consumption, and recharge history. Always call a tool to get real figures. Never invent numbers.",
+        "If a tool rejects its arguments (a date, a missing field), correct them and call it again. Never",
+        "show that error to the user or ask them for something the tool could do without. If DESCO data",
+        "could not be fetched, say plainly what could not be fetched.",
         "",
         "You can also change the user's OWN bot settings when they clearly ask: reminder times, the low",
         "balance threshold, the days-left warning, reminders on/off, and the hourly low-balance re-check.",
@@ -102,16 +104,20 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "  every option, fixed charges, warnings and the assumption.",
         "- What a given amount would do or how long it would last: call simulate_recharge, with rechargeOn",
         "  whenever the user names the day ('1 octber e 500' → 2026-10-01), and reply with only its",
-        "  displayCard token. Its card shows the whole calculation, slab by slab.",
+        "  displayCard token. Its card shows the whole calculation, slab by slab. Only a month ('oct e 500'):",
+        "  its 1st, with rechargeDayUnspecified; do not ask which day. How long the balance lasts with no",
+        "  recharge, around a trip: amountBDT 0.",
         "- Asked for the breakdown, the calculation, 'hiseb', 'tariff wise' or why a figure is what it is:",
-        "  call simulate_recharge. For a plan, use its suggestedBDT and the first day of the window the user",
-        "  chose (the first option if they did not). Never explain the calculation from memory.",
+        "  call simulate_recharge with showBreakdown. For a plan, use its suggestedBDT and the first day of",
+        "  the window the user chose (the first option if they did not). Never explain the calculation from",
+        "  memory. Otherwise leave showBreakdown out: most people only want the answer.",
         "- When a recharge is made never changes the rate of any kWh: the rate depends on the day the power",
         "  is used. Recharging in a new month only changes which fixed charges it pays. Never say recharging",
         "  after the 1st makes the money last longer.",
         "- 'safe', 'nirapod' or 'backup' about an amount means safeBDT. Offer it; do not stretch the date.",
         "- Trips (village, holiday, tour): awayFrom is the first day nobody is home; awayUntil is the day",
-        "  before they are back (back on 9 Nov → 2026-11-08). Cover past the return: until = the return",
+        "  before they are back (back on 9 Nov → 2026-11-08). No return date given: pass awayFrom alone and",
+        "  do not ask for one. Cover past the return: until = the return",
         "  date plus the days they ask for, or plus 3 days if they say 'safe' or 'buffer' about the trip",
         "  without a number. Coming home needs power that day, so never stop at the return date itself.",
         "- Only when the user says something stays on while away (a fridge, a router), pass awayKwhPerDay:",
@@ -311,8 +317,11 @@ export async function askGemini(
             // A recharge card is the whole answer. Around it the model restated
             // the card in its own words, in Bangla digits, or trailed off with
             // half a sentence; so when it used a card, only the cards are sent.
+            // A card the model left out is sent anyway: once it wrote its own
+            // paragraph instead, with ISO dates and no assumption line.
             const shown = cards.filter((token) => text.includes(token));
             if (shown.length > 0) text = shown.join("\n\n");
+            else if (cards.length > 0) text = cards[cards.length - 1];
 
             if (!isInLanguage(text, language)) {
                 const rewritten = await rewriteInLanguage(ai, contents, text, language, instructions);
