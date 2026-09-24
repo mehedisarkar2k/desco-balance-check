@@ -1,4 +1,5 @@
 import {
+    DailyConsumption,
     DescoResponse,
     FetchBalanceParams,
     RechargeRecord,
@@ -6,6 +7,8 @@ import {
     fetchDailyConsumption,
     fetchRechargeHistory,
 } from "../desco";
+import { fetchedAtOf, staleAsOf } from "../descoStore";
+import { shiftDate } from "./dates";
 import {
     DailyDelta,
     UsageSummary,
@@ -50,12 +53,74 @@ export interface PeriodSummary {
     entries: DailyDelta[];
 }
 
+export interface DailyUsageReport {
+    today: string;
+    yesterday: string;
+    /** Oldest day inside the requested window. */
+    firstDay: string;
+    /** Everything fetched, oldest first. Wider than the window, so the tariff curve has a baseline. */
+    rows: DailyConsumption[];
+    /** Only the days inside the requested window. */
+    period: PeriodSummary | null;
+    /** Newest day DESCO has a reading for. */
+    latestReadingDate: string | null;
+    /** Yesterday was checked for and DESCO has not published it yet. */
+    yesterdayUnpublished: boolean;
+    /** When this data was last fetched from DESCO. */
+    checkedAt?: Date;
+    /** Set when DESCO did not answer and a saved copy was used. */
+    savedCopyAsOf?: Date;
+}
+
+/**
+ * Daily usage for "the last N days", meaning the N days ending yesterday, since
+ * today has no reading until tomorrow.
+ */
+export async function getDailyUsage(
+    params: FetchBalanceParams,
+    requestedDays: number
+): Promise<DailyUsageReport | null> {
+    const today = todayInBillingZone();
+    const yesterday = shiftDate(today, -1);
+    const firstDay = shiftDate(today, -requestedDays);
+
+    // One reading before the window is needed to turn the first cumulative
+    // reading into a day's usage, and the tariff curve needs a baseline from
+    // the previous month, so the fetch reaches further back than the window.
+    const { dateFrom, dateTo } = consumptionRange(today, Math.max(requestedDays + 1, TARIFF_WINDOW_DAYS));
+    const rows = await fetchDailyConsumption(params, dateFrom, dateTo);
+    if (!rows) return null;
+
+    // Daily figures are computed across everything fetched and only then cut to
+    // the window. Cutting first loses the reading before the window, and the
+    // old code then fell back to the entire fetch: a request for one day
+    // returned thirty-seven, and the newest of those was reported as
+    // "yesterday" when it was the day before.
+    const entries = dailyDeltas(rows).filter((day) => day.date >= firstDay && day.date <= yesterday);
+    const latestReadingDate = rows.length > 0 ? rows[rows.length - 1].date : null;
+    const savedCopyAsOf = staleAsOf(rows);
+
+    return {
+        today,
+        yesterday,
+        firstDay,
+        rows,
+        period: summarizePeriod(entries),
+        latestReadingDate,
+        yesterdayUnpublished: !savedCopyAsOf && (latestReadingDate ?? "") < yesterday,
+        checkedAt: fetchedAtOf(rows),
+        savedCopyAsOf,
+    };
+}
+
 export interface Overview {
     requestedDays: number;
     /** Null when DESCO would not serve the balance; the rest of the report still stands. */
     balance: DescoResponse | null;
     usage: UsageSummary | null;
     period: PeriodSummary | null;
+    /** The daily series behind `period`, with its dates and freshness. */
+    daily: DailyUsageReport | null;
     /** Null when the lookup failed, empty when there were simply no recharges. */
     recharges: RechargeRecord[] | null;
     /** Set when any part is a saved copy because DESCO did not answer. */
@@ -102,30 +167,25 @@ export async function getOverview(
     params: FetchBalanceParams,
     requestedDays: number
 ): Promise<{ success: boolean; overview?: Overview; error?: string; attemptedUrls?: string[] }> {
-    // Anchored to today, so the date range does not depend on getBalance
-    // answering first. One extra day of history, since N daily figures need
-    // N+1 cumulative readings, and always far enough back for the tariff curve.
-    const anchor = todayInBillingZone();
-    const { dateFrom, dateTo } = consumptionRange(
-        anchor,
-        Math.max(requestedDays + 1, TARIFF_WINDOW_DAYS)
-    );
-    const periodStart = consumptionRange(anchor, requestedDays + 1).dateFrom;
+    // Recharges cover exactly the requested window. They used to share the
+    // wider range fetched for the tariff curve, so "/usage 7" listed a
+    // recharge from three weeks earlier under "last 7d".
+    const rechargeRange = consumptionRange(todayInBillingZone(), requestedDays);
 
     // Issued together rather than in sequence. These are independent endpoints,
     // and running them in series meant one slow call delayed the rest and a
     // single failure took down parts of the report that had nothing to do with
     // it. Each is allowed to fail on its own.
-    const [balanceResult, rows, recharges] = await Promise.all([
+    const [balanceResult, daily, recharges] = await Promise.all([
         fetchBalance(params).catch((error: any) => {
             console.error("Overview: balance lookup failed:", error.message);
             return null;
         }),
-        fetchDailyConsumption(params, dateFrom, dateTo).catch((error: any) => {
+        getDailyUsage(params, requestedDays).catch((error: any) => {
             console.error("Overview: daily consumption failed:", error.message);
             return null;
         }),
-        fetchRechargeHistory(params, dateFrom, dateTo).catch((error: any) => {
+        fetchRechargeHistory(params, rechargeRange.dateFrom, rechargeRange.dateTo).catch((error: any) => {
             console.error("Overview: recharge history failed:", error.message);
             return null;
         }),
@@ -134,7 +194,7 @@ export async function getOverview(
     const balance = balanceResult?.success ? balanceResult.data ?? null : null;
 
     // Nothing usable came back at all, so there is no report to show.
-    if (!balance && !rows) {
+    if (!balance && !daily) {
         return {
             success: false,
             error: balanceResult?.error ?? "DESCO did not respond (it may be slow or unavailable right now)",
@@ -142,33 +202,31 @@ export async function getOverview(
         };
     }
 
-    let period: PeriodSummary | null = null;
     let usage: UsageSummary | null = null;
 
-    if (rows) {
-        // The report covers the requested period; the curve uses everything.
-        const periodRows = rows.filter((row) => row.date >= periodStart);
-        period = summarizePeriod(dailyDeltas(periodRows.length >= 2 ? periodRows : rows));
-
-        // The runway needs a balance to spend down, so it is only produced when
-        // the balance came back. The usage table stands on its own without it.
-        if (balance) {
-            const windowStart = consumptionRange(balance.readingTime, USAGE_WINDOW_DAYS + 1).dateFrom;
-            const recent = rows.filter((row) => row.date >= windowStart);
-            usage = summarizeUsage(
-                recent.length >= 2 ? recent : rows,
-                balance.balance,
-                balance.readingTime,
-                rows
-            );
-        }
+    // The runway needs a balance to spend down, so it is only produced when the
+    // balance came back. The usage table stands on its own without it.
+    if (daily && balance) {
+        const windowStart = consumptionRange(balance.readingTime, USAGE_WINDOW_DAYS + 1).dateFrom;
+        const recent = daily.rows.filter((row) => row.date >= windowStart);
+        usage = summarizeUsage(
+            recent.length >= 2 ? recent : daily.rows,
+            balance.balance,
+            balance.readingTime,
+            daily.rows
+        );
     }
 
     return {
         success: true,
         overview: {
-            requestedDays, balance, usage, period, recharges,
-            staleLine: staleNote(balance, rows, recharges),
+            requestedDays,
+            balance,
+            usage,
+            period: daily?.period ?? null,
+            daily,
+            recharges,
+            staleLine: staleNote(balance, daily?.rows, recharges),
         },
     };
 }
@@ -178,13 +236,14 @@ export async function getOverview(
  * A step covering a gap is marked, since its figure is the total for several
  * days rather than for the one date shown.
  */
-function formatDailyTable(entries: DailyDelta[]): string[] {
-    if (entries.length === 0) return [];
-
-    const rows = entries.slice(-MAX_DAILY_ROWS);
-    const hasGap = rows.some((row) => row.spanDays > 1);
-
-    const body = rows.map((row) => {
+/**
+ * The aligned day-by-day table, as plain text for a <pre> block.
+ *
+ * Shared by /usage and the assistant, so a list of days always renders the
+ * same way instead of however the model chose to format it.
+ */
+export function renderDailyTable(entries: DailyDelta[]): string {
+    const body = entries.slice(-MAX_DAILY_ROWS).map((row) => {
         const label = formatDayMonth(new Date(Date.parse(row.date)))
             + (row.spanDays > 1 ? ` *${row.spanDays}d` : "");
         // Cost per unit for the day. This is where the banded tariff becomes
@@ -194,10 +253,33 @@ function formatDailyTable(entries: DailyDelta[]): string[] {
         return `${label.padEnd(10)}${row.kwh.toFixed(2).padStart(6)}${row.taka.toFixed(2).padStart(8)}${rate.padStart(7)}`;
     });
 
+    return ["Date         kWh     BDT   Tariff", ...body].join("\n");
+}
+
+/**
+ * The table as it is sent: the <pre> block, plus a note when a row covers
+ * several days, since "6 Sept *2d" means nothing on its own.
+ */
+export function dailyTableHtml(entries: DailyDelta[]): string {
+    const rows = entries.slice(-MAX_DAILY_ROWS);
+    const lines = [`<pre>${renderDailyTable(rows)}</pre>`];
+
+    if (rows.some((row) => row.spanDays > 1)) {
+        lines.push("<i>* DESCO skipped a reading; that row covers several days.</i>");
+    }
+    return lines.join("\n");
+}
+
+function formatDailyTable(entries: DailyDelta[]): string[] {
+    if (entries.length === 0) return [];
+
+    const rows = entries.slice(-MAX_DAILY_ROWS);
+    const hasGap = rows.some((row) => row.spanDays > 1);
+
     const lines = [
         "",
         "📅 <b>Day by day:</b>",
-        `<pre>${["Date         kWh     BDT   Tariff", ...body].join("\n")}</pre>`,
+        `<pre>${renderDailyTable(rows)}</pre>`,
         "<i>Tariff = BDT per kWh that day. It climbs through the month and resets on the 1st.</i>",
     ];
 
@@ -304,7 +386,12 @@ export function formatOverviewMessage(overview: Overview): string {
         const to = formatDayMonth(new Date(Date.parse(period.toDate)));
         lines.push(`<i>${from} – ${to}</i>`, "");
 
-        if (period.days < requestedDays) {
+        const unpublished = overview.daily?.yesterdayUnpublished ?? false;
+        if (unpublished) {
+            const yesterday = formatDayMonth(new Date(Date.parse(overview.daily!.yesterday)));
+            lines.push(`<i>ℹ️ DESCO has not published ${yesterday} yet, so the newest day shown is ${to}.</i>`, "");
+        }
+        if (period.days < requestedDays - (unpublished ? 1 : 0)) {
             lines.push(`<i>⚠️ DESCO only has ${period.days} day(s) of readings for this range.</i>`, "");
         }
 
@@ -362,7 +449,7 @@ export function formatOverviewMessage(overview: Overview): string {
     }
 
     if (balance) {
-        lines.push("", `📅 <b>Reading:</b> <code>${balance.readingTime}</code>`);
+        lines.push("", `📅 <b>Balance date:</b> <code>${formatDayMonth(new Date(Date.parse(balance.readingTime)))}</code>`);
     }
 
     if (usage) {

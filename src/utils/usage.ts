@@ -7,6 +7,7 @@ import {
 } from "../desco";
 import { projectRunway, monthToDateUnits } from "../domain/runway";
 import { staleAsOf } from "../descoStore";
+import { shiftDate, todayInBillingZone } from "./dates";
 
 /**
  * Days of history used for the burn-rate average. Fixed, so the runway shown by
@@ -30,6 +31,13 @@ export interface UsageSummary {
     sampleDays: number;
     /** True when the runway was priced against the tariff, not a flat average. */
     tariffAware: boolean;
+    /** The most recent day DESCO has a reading for. */
+    latestDay?: DailyDelta;
+    /**
+     * True when yesterday's reading was checked for and DESCO has not
+     * published it yet, as opposed to it being missing from a saved copy.
+     */
+    yesterdayUnpublished?: boolean;
 }
 
 const DAY_MS = 86_400_000;
@@ -42,17 +50,7 @@ function toDateString(date: Date): string {
     return date.toISOString().slice(0, 10);
 }
 
-/**
- * Today in the billing timezone, as YYYY-MM-DD.
- *
- * A date anchor that does not require calling DESCO first, so a lookup needing
- * only a date range is not taken down by an unrelated endpoint being slow.
- */
-export function todayInBillingZone(): string {
-    return new Date().toLocaleDateString("en-CA", {
-        timeZone: process.env.TZ || "Asia/Dhaka",
-    });
-}
+export { todayInBillingZone };
 
 /** Date range ending the day before `readingTime`, covering `days` days. */
 export function consumptionRange(readingTime: string, days: number): { dateFrom: string; dateTo: string } {
@@ -206,6 +204,15 @@ export async function getBalanceReport(params: FetchBalanceParams): Promise<{
                 result.data.readingTime,
                 rows
             );
+
+            if (usage) {
+                const deltas = dailyDeltas(rows);
+                const latestDay = deltas[deltas.length - 1];
+                const yesterday = shiftDate(todayInBillingZone(), -1);
+
+                usage.latestDay = latestDay;
+                usage.yesterdayUnpublished = Boolean(latestDay && latestDay.date < yesterday && !staleAsOf(rows));
+            }
         }
     } catch (error: any) {
         console.error("Failed to derive usage summary:", error.message);
@@ -240,6 +247,10 @@ export function formatBalanceMessage(
 
     lines.push(`💰 <b>Balance:</b> <code>${data.balance.toFixed(2)} BDT</code>`);
 
+    if (usage?.latestDay) {
+        lines.push(...latestDayLines(usage.latestDay, Boolean(usage.yesterdayUnpublished)));
+    }
+
     if (usage) {
         const days = Math.floor(usage.daysRemaining);
         lines.push(
@@ -250,7 +261,9 @@ export function formatBalanceMessage(
 
     lines.push(
         `⚡ <b>This month:</b> <code>${data.currentMonthTaka.toFixed(2)} BDT</code>`,
-        `📅 <b>Reading:</b> <code>${data.readingTime}</code>`
+        // Named for what it is. "Reading: 2026-09-24" next to usage that ran
+        // only to the 23rd left people asking which day it referred to.
+        `📅 <b>Balance date:</b> <code>${formatDayMonth(new Date(Date.parse(data.readingTime)))}</code>`
     );
 
     if (usage) {
@@ -263,6 +276,29 @@ export function formatBalanceMessage(
     }
 
     return lines.join("\n");
+}
+
+/**
+ * The most recent day's usage, labelled with its real date.
+ *
+ * It is called "Yesterday" only when it is yesterday. Before DESCO publishes
+ * the morning's reading the newest day is the one before, and labelling that
+ * as yesterday is exactly the mistake users caught the assistant making.
+ */
+function latestDayLines(day: DailyDelta, yesterdayUnpublished: boolean): string[] {
+    const yesterday = shiftDate(todayInBillingZone(), -1);
+    const label = day.date === yesterday ? "Yesterday" : "Latest day";
+    const date = formatDayMonth(new Date(Date.parse(day.date)));
+    const rate = day.kwh > 0 ? ` · <code>${(day.taka / day.kwh).toFixed(2)}/kWh</code>` : "";
+    const span = day.spanDays > 1 ? ` <i>(covers ${day.spanDays} days)</i>` : "";
+
+    const lines = [
+        `🔌 <b>${label} (${date}):</b> <code>${day.kwh.toFixed(2)} kWh</code> · <code>${day.taka.toFixed(2)} BDT</code>${rate}${span}`,
+    ];
+    if (yesterdayUnpublished) {
+        lines.push(`<i>DESCO has not published ${formatDayMonth(new Date(Date.parse(yesterday)))} yet.</i>`);
+    }
+    return lines;
 }
 
 /**

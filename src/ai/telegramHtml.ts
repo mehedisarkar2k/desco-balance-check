@@ -78,10 +78,79 @@ function attributesFor(tag: string, raw: string): string {
     return "";
 }
 
+/**
+ * Markdown the model wrote anyway, rewritten as Telegram HTML.
+ *
+ * Telegram shows markdown literally in HTML mode, so a list written as
+ * "*   2026-08-10: 8.68 kWh" arrived with a bare asterisk on every line. Only
+ * unambiguous forms are converted: line-start bullets, **bold**, # headings,
+ * `code` and pipe tables. A single * or _ is left alone, since it is as likely
+ * to be arithmetic or part of a name as emphasis. Text inside <pre> is never
+ * touched, so the aligned tables the bot inserts stay exactly as rendered.
+ */
+function markdownToHtml(input: string): string {
+    return input
+        .split(/(<pre[\s\S]*?<\/pre>)/i)
+        .map((segment, index) => (index % 2 === 1 ? segment : convertMarkdown(segment)))
+        .join("");
+}
+
+function convertMarkdown(text: string): string {
+    const lines = text.split("\n");
+    const out: string[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        // A run of pipe-table lines becomes one aligned block.
+        if (isTableLine(lines[i])) {
+            const block: string[] = [];
+            while (i < lines.length && isTableLine(lines[i])) block.push(lines[i++]);
+            i -= 1;
+            out.push(tableToPre(block));
+            continue;
+        }
+
+        out.push(
+            lines[i]
+                .replace(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/, "<b>$1</b>")
+                .replace(/^(\s*)[*+-]\s+/, "$1• ")
+        );
+    }
+
+    return out
+        .join("\n")
+        .replace(/\*\*(?=\S)([^*\n]+?)\*\*/g, "<b>$1</b>")
+        .replace(/__(?=\S)([^_\n]+?)__/g, "<b>$1</b>")
+        .replace(/`([^`\n]+)`/g, "<code>$1</code>");
+}
+
+function isTableLine(line: string): boolean {
+    return /^\s*\|.*\|\s*$/.test(line);
+}
+
+function tableToPre(lines: string[]): string {
+    const rows = lines
+        .map((line) =>
+            line.trim().replace(/^\||\|$/g, "").split("|")
+                .map((cell) => cell.replace(/<[^>]+>/g, "").replace(/\*\*/g, "").trim())
+        )
+        // The |---|---| separator row carries no data.
+        .filter((cells) => !cells.every((cell) => cell === "" || /^:?-{2,}:?$/.test(cell)));
+
+    const widths: number[] = [];
+    for (const cells of rows) {
+        cells.forEach((cell, k) => {
+            widths[k] = Math.max(widths[k] ?? 0, cell.length);
+        });
+    }
+
+    const body = rows.map((cells) => cells.map((cell, k) => cell.padEnd(widths[k])).join("  ").trimEnd());
+    return `<pre>${body.join("\n")}</pre>`;
+}
+
 export function sanitizeTelegramHtml(input: string): string {
     // List markup has no Telegram equivalent, so turn it into bullet text
     // before tag filtering would otherwise discard the structure entirely.
-    const withBullets = input
+    const withBullets = markdownToHtml(input)
         .replace(BREAK_TAGS, "\n")
         .replace(/<\s*li\s*[^>]*>/gi, "\n• ")
         .replace(/<\s*\/\s*li\s*>/gi, "")

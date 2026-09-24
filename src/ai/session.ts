@@ -1,13 +1,18 @@
 import type { Content } from "@google/genai";
+import type { ReplyLanguage } from "./language";
 
 /**
  * How long a conversation stays "the same session". Coming back after this
- * gap starts a fresh one: history is dropped and DESCO is queried again.
+ * gap starts a fresh one with no history. How often DESCO itself is asked is
+ * decided by the saved-data store, not by the chat.
  */
 export const SESSION_IDLE_MS = 30 * 60 * 1000;
 
 /** Turns kept for context. Older turns are dropped to bound prompt size. */
 const MAX_HISTORY_TURNS = 12;
+
+/** Tables kept per session, so a token repeated in a later reply still resolves. */
+const MAX_TABLES = 8;
 
 export interface Session {
     userId: number;
@@ -15,16 +20,20 @@ export interface Session {
     lastActiveAt: number;
     history: Content[];
     /**
-     * DESCO responses fetched during this session.
+     * Pre-rendered tables handed to the model as short tokens. The model writes
+     * the token and the bot substitutes the table, so a list of days always
+     * renders aligned instead of however the model chose to format it, and the
+     * rows do not have to be generated token by token.
      *
-     * DESCO publishes one reading per day, so re-fetching within a
-     * conversation would return identical data. Caching per session means a
-     * multi-turn chat costs one call per kind of data rather than one per
-     * question.
+     * DESCO data itself is deliberately not cached here. The saved-data store
+     * decides freshness, and a second copy per chat held whatever the first
+     * question returned for as long as the conversation stayed active --
+     * including a copy that was missing the newest day.
      */
-    cache: Map<string, unknown>;
-    /** Calls actually made to DESCO this session, for observability. */
-    apiCalls: number;
+    tables: Map<string, string>;
+    tableSeq: number;
+    /** Language of the last message that had one, for a bare "23?" or emoji. */
+    language: ReplyLanguage;
 }
 
 const sessions = new Map<number, Session>();
@@ -35,8 +44,9 @@ function createSession(userId: number, now: number): Session {
         startedAt: now,
         lastActiveAt: now,
         history: [],
-        cache: new Map(),
-        apiCalls: 0,
+        tables: new Map(),
+        tableSeq: 0,
+        language: "en",
     };
 }
 
@@ -58,43 +68,24 @@ export function getSession(userId: number): { session: Session; isNew: boolean }
     return { session, isNew: true };
 }
 
-/**
- * A tool result that should not be kept for the session: a failure, or a saved
- * copy served because DESCO was down. Either would otherwise be replayed for
- * the rest of the chat after DESCO had recovered.
- */
-function isFailure(value: unknown): boolean {
-    if (!value || typeof value !== "object") return false;
-    return "error" in (value as object) || "savedCopy" in (value as object);
+/** Registers a rendered table (finished HTML) and returns the token the model should write for it. */
+export function registerTable(session: Session, table: string): string {
+    session.tableSeq += 1;
+    const token = `[[TABLE_${session.tableSeq}]]`;
+    session.tables.set(token, table);
+
+    while (session.tables.size > MAX_TABLES) {
+        session.tables.delete(session.tables.keys().next().value as string);
+    }
+    return token;
 }
 
 /**
- * Runs `loader` only the first time a key is requested in a session, and
- * returns the stored value afterwards.
- *
- * Failures are deliberately not stored. DESCO times out intermittently, and
- * caching the error would keep serving it for the rest of the session: a user
- * who asked again a minute later would get the same stale failure even once
- * DESCO had recovered. Retrying a failed lookup costs one request; caching it
- * costs the user the whole session.
+ * Replaces table tokens in a reply with their tables. A token that no longer
+ * resolves is dropped rather than shown to the user as "[[TABLE_3]]".
  */
-export async function cached<T>(
-    session: Session,
-    key: string,
-    loader: () => Promise<T>
-): Promise<T> {
-    if (session.cache.has(key)) {
-        return session.cache.get(key) as T;
-    }
-
-    const value = await loader();
-    session.apiCalls += 1;
-
-    if (!isFailure(value)) {
-        session.cache.set(key, value);
-    }
-
-    return value;
+export function expandTables(session: Session, text: string): string {
+    return text.replace(/\[\[TABLE_\d+\]\]/g, (token) => session.tables.get(token) ?? "");
 }
 
 /** A message the user typed, as opposed to a tool result sent in the user role. */

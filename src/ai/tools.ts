@@ -4,12 +4,12 @@ import { UserService } from "../services/UserService";
 import { User } from "../models/User";
 import { fetchCustomerInfo, fetchMonthlyConsumption, fetchDailyConsumption } from "../desco";
 import { buildMonthCurves, describeTariff } from "../domain/tariff";
-import { consumptionRange, TARIFF_WINDOW_DAYS, todayInBillingZone } from "../utils/usage";
+import { consumptionRange, TARIFF_WINDOW_DAYS, todayInBillingZone, dailyDeltas, DailyDelta } from "../utils/usage";
 import { getBalanceReport } from "../utils/usage";
-import { getOverview, getRecharges } from "../utils/overview";
-import { Session, cached } from "./session";
-import { activeSessionCount } from "./session";
+import { dailyTableHtml, getDailyUsage, getRecharges } from "../utils/overview";
+import { Session, activeSessionCount, registerTable } from "./session";
 import { staleAsOf } from "../descoStore";
+import { nowInBillingZone, shiftDate } from "../utils/dates";
 
 export type Role = "user" | "admin";
 
@@ -30,8 +30,7 @@ interface Tool {
 
 /**
  * Flags a result built from a saved copy, so the model tells the user the
- * figures are not live. `savedCopy` also stops the session cache keeping it,
- * otherwise a chat would hold on to old data after DESCO had recovered.
+ * figures are not live.
  */
 function withFreshness<T extends object>(result: T, ...sources: unknown[]): T {
     const times = sources.map(staleAsOf).filter((t): t is Date => Boolean(t));
@@ -44,6 +43,20 @@ function withFreshness<T extends object>(result: T, ...sources: unknown[]): T {
         dataAsOf: oldest.toISOString(),
         freshnessNote:
             "DESCO did not respond, so these figures are a saved copy from dataAsOf. Tell the user that plainly.",
+    };
+}
+
+/** One day's usage in the shape the model is given. */
+function describeDay(day: DailyDelta) {
+    return {
+        date: day.date,
+        kwh: Number(day.kwh.toFixed(2)),
+        bdt: Number(day.taka.toFixed(2)),
+        // The tariff actually charged that day, so "what rate was I charged on
+        // the 7th" does not leave the model to do the division, or to skip it.
+        ratePerKwh: day.kwh > 0 ? Number((day.taka / day.kwh).toFixed(2)) : null,
+        // Above 1 when DESCO skipped readings; the figure then covers several days.
+        coversDays: day.spanDays,
     };
 }
 
@@ -91,31 +104,38 @@ const TOOLS: Record<string, Tool> = {
         declaration: {
             name: "get_balance",
             description:
-                "Current DESCO prepaid balance for the user, with how many days of power it is expected to last, " +
-                "the expected run-out date, and average daily consumption in kWh and BDT.",
+                "Current DESCO prepaid balance for the user, the newest day's usage, how many days of power the " +
+                "balance is expected to last, the expected run-out date, and average daily consumption.",
         },
         handler: async (_args, ctx) => {
             const params = requireAccount(ctx);
             if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
 
-            return await cached(ctx.session, "balance", async () => {
-                const result = await getBalanceReport(params);
-                if (!result.success || !result.report) {
-                    return { error: result.error ?? "Could not reach DESCO" };
-                }
+            const result = await getBalanceReport(params);
+            if (!result.success || !result.report) {
+                return { error: result.error ?? "Could not reach DESCO" };
+            }
 
-                const { data, usage } = result.report;
-                return withFreshness({
-                    balanceBDT: data.balance,
-                    monthToDateCostBDT: data.currentMonthTaka,
-                    readingDate: data.readingTime,
-                    daysRemaining: usage?.daysRemaining ?? null,
-                    runoutDate: usage?.runoutDate?.toISOString().slice(0, 10) ?? null,
-                    avgDailyKwh: usage?.kwhPerDay ?? null,
-                    avgDailyBDT: usage?.takaPerDay ?? null,
-                    tariffAware: usage?.tariffAware ?? false,
-                }, data);
-            });
+            const { data, usage } = result.report;
+            const yesterday = shiftDate(todayInBillingZone(), -1);
+            const latest = usage?.latestDay;
+
+            return withFreshness({
+                balanceBDT: data.balance,
+                monthToDateCostBDT: data.currentMonthTaka,
+                // Named apart on purpose. The balance carries today's date while
+                // the newest daily reading is normally yesterday's, and one field
+                // called "readingDate" let the two be confused.
+                balanceDate: data.readingTime,
+                latestDailyReading: latest ? describeDay(latest) : null,
+                yesterday,
+                yesterdayPublished: Boolean(latest && latest.date >= yesterday),
+                daysRemaining: usage?.daysRemaining ?? null,
+                runoutDate: usage?.runoutDate?.toISOString().slice(0, 10) ?? null,
+                avgDailyKwh: usage ? Number(usage.kwhPerDay.toFixed(2)) : null,
+                avgDailyBDT: usage ? Number(usage.takaPerDay.toFixed(2)) : null,
+                tariffAware: usage?.tariffAware ?? false,
+            }, data);
         },
     },
 
@@ -124,16 +144,18 @@ const TOOLS: Record<string, Tool> = {
         declaration: {
             name: "get_daily_usage",
             description:
-                "Day-by-day electricity consumption for a recent period. Returns each day's kWh, BDT and the " +
-                "tariff charged that day (ratePerKwh), " +
-                "plus totals, averages, and the busiest and quietest day. Use for questions about usage on " +
-                "particular dates or trends over days.",
+                "Day-by-day electricity use for the last N days, ending yesterday (today has no reading until " +
+                "tomorrow). Each day has kWh, BDT and the tariff charged that day (ratePerKwh). Also returns " +
+                "today's and yesterday's dates, the newest date DESCO has a reading for, whether yesterday is " +
+                "published yet, totals, averages, and a displayTable token for showing many days.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
                     days: {
                         type: Type.NUMBER,
-                        description: "How many days back to report, 1 to 45. DESCO only keeps about 45 days.",
+                        description:
+                            "How many days, ending yesterday: 1 is yesterday only, 7 is the last week. " +
+                            "At most 45, since DESCO keeps about 45 days.",
                     },
                 },
                 required: ["days"],
@@ -143,43 +165,46 @@ const TOOLS: Record<string, Tool> = {
             const params = requireAccount(ctx);
             if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
 
-            const days = Math.min(Math.max(Math.round(args?.days ?? 7), 1), 45);
+            const days = Math.min(Math.max(Math.round(Number(args?.days) || 7), 1), 45);
+            const report = await getDailyUsage(params, days);
+            if (!report) return { error: "Could not load consumption readings from DESCO." };
 
-            return await cached(ctx.session, `usage:${days}`, async () => {
-                const result = await getOverview(params, days);
-                if (!result.success || !result.overview) {
-                    return { error: result.error ?? "Could not reach DESCO" };
-                }
+            const { period } = report;
+            const allDays = dailyDeltas(report.rows);
+            const latest = allDays[allDays.length - 1];
+            const checked = report.checkedAt ? nowInBillingZone(report.checkedAt).slice(11) : null;
 
-                const { period } = result.overview;
-                if (!period) return { error: "No consumption readings available for that range." };
-
-                return {
-                    from: period.fromDate,
-                    to: period.toDate,
-                    daysCovered: period.days,
-                    totalKwh: period.totalKwh,
-                    totalBDT: period.totalTaka,
-                    avgKwhPerDay: period.kwhPerDay,
-                    avgBDTPerDay: period.takaPerDay,
-                    busiestDay: period.highest && { date: period.highest.date, kwh: period.highest.kwh, bdt: period.highest.taka },
-                    quietestDay: period.lowest && { date: period.lowest.date, kwh: period.lowest.kwh, bdt: period.lowest.taka },
-                    // Gap rows cover several days; the model must not read them as one day.
-                    daily: period.entries.map((entry) => ({
-                        date: entry.date,
-                        kwh: Number(entry.kwh.toFixed(2)),
-                        bdt: Number(entry.taka.toFixed(2)),
-                        // The tariff actually charged that day. Without it a
-                        // question like "what rate was I charged on the 7th"
-                        // leaves the model to do the division, or to skip it.
-                        ratePerKwh: entry.kwh > 0 ? Number((entry.taka / entry.kwh).toFixed(2)) : null,
-                        coversDays: entry.spanDays,
-                    })),
-                    ...(result.overview.staleLine
-                        ? { savedCopy: true, freshnessNote: "DESCO did not respond; these figures are a saved copy. Tell the user that plainly." }
-                        : {}),
-                };
-            });
+            return withFreshness({
+                // Stated outright rather than left to inference. Given only a
+                // list of rows, the model took the newest row to be yesterday
+                // even when it was the day before.
+                today: report.today,
+                yesterday: report.yesterday,
+                requestedDays: { from: report.firstDay, to: report.yesterday },
+                latestReadingDate: report.latestReadingDate,
+                yesterdayPublished: (report.latestReadingDate ?? "") >= report.yesterday,
+                ...(report.yesterdayUnpublished
+                    ? {
+                        note:
+                            `DESCO has not published ${report.yesterday} yet` +
+                            (checked ? ` (checked at ${checked} Dhaka time)` : "") +
+                            `. The newest reading is ${report.latestReadingDate}.`,
+                    }
+                    : {}),
+                latestDay: latest ? describeDay(latest) : null,
+                daysWithReadings: period?.entries.length ?? 0,
+                totalKwh: period ? Number(period.totalKwh.toFixed(2)) : 0,
+                totalBDT: period ? Number(period.totalTaka.toFixed(2)) : 0,
+                avgKwhPerDay: period ? Number(period.kwhPerDay.toFixed(2)) : null,
+                avgBDTPerDay: period ? Number(period.takaPerDay.toFixed(2)) : null,
+                busiestDay: period?.highest && period.entries.length > 1 ? describeDay(period.highest) : null,
+                quietestDay: period?.lowest && period.entries.length > 1 ? describeDay(period.lowest) : null,
+                daily: period?.entries.map(describeDay) ?? [],
+                displayTable:
+                    period && period.entries.length > 0
+                        ? registerTable(ctx.session, dailyTableHtml(period.entries))
+                        : null,
+            }, report.rows);
         },
     },
 
@@ -204,24 +229,22 @@ const TOOLS: Record<string, Tool> = {
 
             const days = Math.min(Math.max(Math.round(args?.days ?? 90), 1), 365);
 
-            return await cached(ctx.session, `recharges:${days}`, async () => {
-                const result = await getRecharges(params, days);
-                if (!result.success || !result.recharges) {
-                    return { error: result.error ?? "Could not reach DESCO" };
-                }
+            const result = await getRecharges(params, days);
+            if (!result.success || !result.recharges) {
+                return { error: result.error ?? "Could not reach DESCO" };
+            }
 
-                return withFreshness({
-                    count: result.recharges.length,
-                    recharges: result.recharges.map((r) => ({
-                        date: r.rechargeDate.slice(0, 10),
-                        paidBDT: r.totalAmount,
-                        energyBDT: r.energyAmount,
-                        chargesBDT: r.chargeAmount,
-                        operator: r.rechargeOperator,
-                        status: r.orderStatus,
-                    })),
-                }, result.recharges);
-            });
+            return withFreshness({
+                count: result.recharges.length,
+                recharges: result.recharges.map((r) => ({
+                    date: r.rechargeDate.slice(0, 10),
+                    paidBDT: r.totalAmount,
+                    energyBDT: r.energyAmount,
+                    chargesBDT: r.chargeAmount,
+                    operator: r.rechargeOperator,
+                    status: r.orderStatus,
+                })),
+            }, result.recharges);
         },
     },
 
@@ -246,18 +269,16 @@ const TOOLS: Record<string, Tool> = {
 
             const months = Math.min(Math.max(Math.round(args?.months ?? 12), 1), 12);
 
-            return await cached(ctx.session, `monthly:${months}`, async () => {
-                const rows = await fetchMonthlyConsumption(params, months);
-                if (!rows) return { error: "Could not load monthly consumption from DESCO." };
+            const rows = await fetchMonthlyConsumption(params, months);
+            if (!rows) return { error: "Could not load monthly consumption from DESCO." };
 
-                return {
-                    months: rows.map((row) => ({
-                        month: row.month,
-                        kwh: row.consumedUnit,
-                        bdt: row.consumedTaka,
-                    })),
-                };
-            });
+            return {
+                months: rows.map((row) => ({
+                    month: row.month,
+                    kwh: row.consumedUnit,
+                    bdt: row.consumedTaka,
+                })),
+            };
         },
     },
 
@@ -273,10 +294,8 @@ const TOOLS: Record<string, Tool> = {
             const params = requireAccount(ctx);
             if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
 
-            return await cached(ctx.session, "customerInfo", async () => {
-                const info = await fetchCustomerInfo(params);
-                return info ?? { error: "Could not load account info from DESCO." };
-            });
+            const info = await fetchCustomerInfo(params);
+            return info ?? { error: "Could not load account info from DESCO." };
         },
     },
 
@@ -319,36 +338,34 @@ const TOOLS: Record<string, Tool> = {
             const params = requireAccount(ctx);
             if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
 
-            return await cached(ctx.session, "tariff", async () => {
-                // The bands come entirely from the consumption readings, so the
-                // balance is not consulted. Fetching it first only to read its
-                // date meant a slow getBalance took this down with it, even
-                // though the readings it needs were served fine.
-                const { dateFrom, dateTo } = consumptionRange(todayInBillingZone(), TARIFF_WINDOW_DAYS);
-                const rows = await fetchDailyConsumption(params, dateFrom, dateTo);
-                if (!rows) return { error: "Could not load consumption readings from DESCO." };
+            // The bands come entirely from the consumption readings, so the
+            // balance is not consulted. Fetching it first only to read its
+            // date meant a slow getBalance took this down with it, even
+            // though the readings it needs were served fine.
+            const { dateFrom, dateTo } = consumptionRange(todayInBillingZone(), TARIFF_WINDOW_DAYS);
+            const rows = await fetchDailyConsumption(params, dateFrom, dateTo);
+            if (!rows) return { error: "Could not load consumption readings from DESCO." };
 
-                // The newest month that has a previous-month baseline. Matching
-                // on today's month would find nothing on the 1st, before any
-                // reading for the new month has been published.
-                const curves = buildMonthCurves(rows);
-                const curve = curves[curves.length - 1];
-                if (!curve) {
-                    return { error: "Not enough readings yet this month to work out the rate bands." };
-                }
+            // The newest month that has a previous-month baseline. Matching
+            // on today's month would find nothing on the 1st, before any
+            // reading for the new month has been published.
+            const curves = buildMonthCurves(rows);
+            const curve = curves[curves.length - 1];
+            if (!curve) {
+                return { error: "Not enough readings yet this month to work out the rate bands." };
+            }
 
-                const breakdown = describeTariff(curve);
-                if (!breakdown) return { error: "Could not derive the tariff for this month." };
+            const breakdown = describeTariff(curve);
+            if (!breakdown) return { error: "Could not derive the tariff for this month." };
 
-                return {
-                    ...breakdown,
-                    note:
-                        "Rates are derived from this account's own readings, not a published table. " +
-                        "The band resets on the 1st of each month, so the rate rises as monthly consumption " +
-                        "grows and drops again next month. Bands shown omit the transition steps where DESCO " +
-                        "re-prices the month, so there may be small gaps between band ranges.",
-                };
-            });
+            return {
+                ...breakdown,
+                note:
+                    "Rates are derived from this account's own readings, not a published table. " +
+                    "The band resets on the 1st of each month, so the rate rises as monthly consumption " +
+                    "grows and drops again next month. Bands shown omit the transition steps where DESCO " +
+                    "re-prices the month, so there may be small gaps between band ranges.",
+            };
         },
     },
 

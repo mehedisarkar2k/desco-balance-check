@@ -5,6 +5,8 @@ import { getSession, resetSession } from "./session";
 import { askGemini, isAiConfigured } from "./gemini";
 import { Role } from "./tools";
 import { sanitizeTelegramHtml, stripTelegramHtml } from "./telegramHtml";
+import { detectReplyLanguage } from "./language";
+import { countDescoCalls } from "../desco";
 
 export { isAiConfigured, resetSession };
 
@@ -52,17 +54,25 @@ export async function handleAiMessage(ctx: Context, text: string) {
 
     await ctx.sendChatAction("typing");
 
+    const language = detectReplyLanguage(text) ?? session.language;
+    session.language = language;
+
     try {
-        const reply = await askGemini(text, session, {
-            userId,
-            role: roleFor(userId),
-            accountNo: user?.accountNo,
-            meterNo: user?.meterNo,
-        });
+        // Counts requests that actually went to DESCO, not lookups: most are
+        // now answered from the saved copy, and the old count of lookups read
+        // as DESCO traffic that never happened.
+        const { result: reply, calls } = await countDescoCalls(() =>
+            askGemini(text, session, {
+                userId,
+                role: roleFor(userId),
+                accountNo: user?.accountNo,
+                meterNo: user?.meterNo,
+            }, language)
+        );
 
         console.log(
-            `AI reply for ${userId} (${isNew ? "new" : "continuing"} session): ` +
-            `tools=[${reply.toolsUsed.join(", ")}] descoCalls=${reply.apiCalls}`
+            `AI reply for ${userId} (${isNew ? "new" : "continuing"} session, ${language}): ` +
+            `tools=[${reply.toolsUsed.join(", ")}] descoCalls=${calls}`
         );
 
         await replySafely(ctx, reply.text);

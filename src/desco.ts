@@ -1,7 +1,9 @@
 import axios from "axios";
 import dotenv from "dotenv";
 import https from "https";
+import { AsyncLocalStorage } from "async_hooks";
 import { cachedSeries, isFresh, markStale, readSnapshot, writeSnapshot } from "./descoStore";
+import { previousMonthInBillingZone, shiftDate, todayInBillingZone } from "./utils/dates";
 
 dotenv.config();
 
@@ -131,6 +133,19 @@ function buildUrl(prefix: string, endpoint: string, query: Record<string, string
 }
 
 /**
+ * Counts requests actually sent to DESCO within a scope, such as one chat
+ * turn. The chat log used to report cache misses as "descoCalls", which read
+ * as DESCO traffic when most of it was served from the saved copy.
+ */
+const callCounter = new AsyncLocalStorage<{ count: number }>();
+
+export async function countDescoCalls<T>(work: () => Promise<T>): Promise<{ result: T; calls: number }> {
+    const counter = { count: 0 };
+    const result = await callCounter.run(counter, work);
+    return { result, calls: counter.count };
+}
+
+/**
  * Calls one endpoint on one prefix. Returns the `data` payload, or null if the
  * request failed or DESCO answered with a non-200 code in the body.
  */
@@ -143,6 +158,9 @@ async function descoGet<T>(
     const url = buildUrl(prefix, endpoint, query);
 
     for (let attempt = 0; attempt <= retries; attempt++) {
+        const counter = callCounter.getStore();
+        if (counter) counter.count += 1;
+
         try {
             const { data } = await axios.get(url, {
                 timeout: REQUEST_TIMEOUT_MS,
@@ -186,6 +204,14 @@ const DAILY_TTL_MS = 3 * 60 * 60 * 1000;
 const MONTHLY_TTL_MS = 12 * 60 * 60 * 1000;
 const CUSTOMER_INFO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * How soon an incomplete copy is re-checked: a balance not yet dated today,
+ * or a series missing its newest expected entry. Short enough that a reading
+ * DESCO has just published shows up within minutes, long enough not to hit
+ * DESCO on every request while it has not published yet.
+ */
+const INCOMPLETE_RETRY_MS = 5 * 60 * 1000;
+
 export async function fetchBalance(params?: FetchBalanceParams): Promise<{
     success: boolean;
     data?: DescoResponse;
@@ -212,7 +238,13 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
         prefixMemo.set(memoKey(params), stored.payload.prefix);
     }
 
-    if (stored && isFresh(stored.fetchedAt, BALANCE_TTL_MS)) {
+    // DESCO dates the balance with the current day. A copy still carrying an
+    // earlier date is incomplete, so it is re-checked soon rather than served
+    // for the full interval.
+    const datedToday = (stored?.payload?.data?.readingTime ?? "") >= todayInBillingZone();
+    const trustFor = datedToday ? BALANCE_TTL_MS : INCOMPLETE_RETRY_MS;
+
+    if (stored && isFresh(stored.fetchedAt, trustFor)) {
         return { success: true, prefix: stored.payload.prefix, data: stored.payload.data };
     }
 
@@ -290,6 +322,10 @@ export async function fetchDailyConsumption(
         ttlMs: DAILY_TTL_MS,
         from: dateFrom,
         to: dateTo,
+        // DESCO publishes a day's reading the next morning, so a complete copy
+        // runs to yesterday.
+        expectedLatest: shiftDate(todayInBillingZone(), -1),
+        retryMs: INCOMPLETE_RETRY_MS,
         idOf: (row) => row.date,
         dateOf: (row) => row.date,
         sort: (a, b) => a.date.localeCompare(b.date),
@@ -379,6 +415,8 @@ export async function fetchMonthlyConsumption(
         ttlMs: MONTHLY_TTL_MS,
         from: query.monthFrom,
         to: query.monthTo,
+        expectedLatest: previousMonthInBillingZone(),
+        retryMs: INCOMPLETE_RETRY_MS,
         idOf: (row) => row.month,
         dateOf: (row) => row.month,
         sort: (a, b) => a.month.localeCompare(b.month),

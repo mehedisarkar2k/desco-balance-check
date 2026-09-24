@@ -15,6 +15,19 @@ import { DescoSnapshot } from "./models/DescoSnapshot";
 /** Values served from a saved copy because the live call failed. */
 const staleMarks = new WeakMap<object, Date>();
 
+/** When the data in a returned value was last fetched from DESCO. */
+const fetchedMarks = new WeakMap<object, Date>();
+
+/** When a value's data was last fetched from DESCO, if known. */
+export function fetchedAtOf(value: unknown): Date | undefined {
+    return value && typeof value === "object" ? fetchedMarks.get(value as object) : undefined;
+}
+
+function markFetched<T extends object>(value: T, at: Date): T {
+    fetchedMarks.set(value, at);
+    return value;
+}
+
 /** When a value was originally fetched, if it is a stale saved copy. */
 export function staleAsOf(value: unknown): Date | undefined {
     return value && typeof value === "object" ? staleMarks.get(value as object) : undefined;
@@ -78,6 +91,13 @@ interface SeriesOptions<T> {
     dateOf: (row: T) => string;
     sort: (a: T, b: T) => number;
     load: () => Promise<T[] | null>;
+    /**
+     * The newest entry a complete copy must contain, such as yesterday's
+     * reading. A saved copy missing it is re-checked with DESCO once `retryMs`
+     * has passed, rather than being trusted for the whole `ttlMs`.
+     */
+    expectedLatest?: string;
+    retryMs?: number;
 }
 
 /**
@@ -91,15 +111,27 @@ interface SeriesOptions<T> {
  * range is served as stale.
  */
 export async function cachedSeries<T extends object>(options: SeriesOptions<T>): Promise<T[] | null> {
-    const { key, ttlMs, from, to, idOf, dateOf, sort, load } = options;
+    const { key, ttlMs, from, to, idOf, dateOf, sort, load, expectedLatest, retryMs } = options;
     const inRange = (rows: T[]) => rows.filter((row) => dateOf(row) >= from && dateOf(row) <= to).sort(sort);
 
     const stored = await readSnapshot<T[]>(key);
     const storedRows = Array.isArray(stored?.payload) ? stored!.payload : [];
-    const covered = Boolean(stored?.coveredFrom && stored.coveredFrom <= from);
+    const coversStart = Boolean(stored?.coveredFrom && stored.coveredFrom <= from);
 
-    if (stored && covered && isFresh(stored.fetchedAt, ttlMs)) {
-        return inRange(storedRows);
+    // Age alone does not make a copy good enough. A copy saved early in the
+    // morning, before DESCO had published yesterday's reading, is young but
+    // incomplete, and trusting it for hours meant the newest day stayed
+    // missing all morning: the assistant then reported the day before as
+    // "yesterday" and insisted yesterday had no reading. An incomplete copy is
+    // only trusted until the short retry interval, so DESCO is asked again
+    // soon, but not on every request while it has not published yet.
+    const latestStored = storedRows.reduce((max, row) => (dateOf(row) > max ? dateOf(row) : max), "");
+    const wantedEnd = expectedLatest && expectedLatest < to ? expectedLatest : to;
+    const complete = !expectedLatest || latestStored >= wantedEnd;
+    const trustFor = complete ? ttlMs : Math.min(retryMs ?? ttlMs, ttlMs);
+
+    if (stored && coversStart && isFresh(stored.fetchedAt, trustFor)) {
+        return markFetched(inRange(storedRows), new Date(stored.fetchedAt));
     }
 
     const live = await load();
@@ -113,13 +145,13 @@ export async function cachedSeries<T extends object>(options: SeriesOptions<T>):
         const coveredFrom = stored?.coveredFrom && stored.coveredFrom < from ? stored.coveredFrom : from;
         await writeSnapshot(key, rows, coveredFrom);
 
-        return inRange(rows);
+        return markFetched(inRange(rows), new Date());
     }
 
     const fallback = inRange(storedRows);
     if (stored && fallback.length > 0) {
         console.warn(`DESCO unavailable, serving saved ${key} from ${stored.fetchedAt.toISOString()}`);
-        return markStale(fallback, stored.fetchedAt);
+        return markFetched(markStale(fallback, stored.fetchedAt), new Date(stored.fetchedAt));
     }
 
     return null;
