@@ -38,6 +38,12 @@ export interface RechargeRecord {
     chargeAmount: number;
     rechargeOperator: string;
     orderStatus: string;
+    /**
+     * DESCO's own breakdown ("Demand Charge", "Meter Rent 1P"), pre-VAT.
+     * Kept so a recharge that paid for several months shows it, and so any
+     * new kind of charge appears instead of hiding inside chargeAmount.
+     */
+    chargeItems?: Array<{ name: string; amount: number }>;
 }
 
 export interface FetchBalanceParams {
@@ -558,6 +564,12 @@ export async function fetchRechargeHistory(
                     chargeAmount: Number(row.chargeAmount),
                     rechargeOperator: row.rechargeOperator,
                     orderStatus: row.orderStatus,
+                    chargeItems: Array.isArray(row.chargeItems)
+                        ? row.chargeItems.map((item: any) => ({
+                            name: String(item.chargeItemName ?? ""),
+                            amount: Number(item.chargeAmount) || 0,
+                        }))
+                        : undefined,
                 }));
             }
             return answeredEmpty ? [] : null;

@@ -57,12 +57,17 @@ export interface DaySpend {
  * The runway and the recharge planner both read this one sequence, so the
  * date a balance runs out and the amount needed to reach a date can never
  * disagree. Returns null when no tariff curve can be built.
+ *
+ * Days for which `isAway` returns true use nothing: the house is empty. They
+ * also leave the month's running total where it is, so the days after a
+ * return are priced at the lower slab they really fall in.
  */
 export function spendDays(
     rows: DailyConsumption[],
     readingTime: string,
     kwhPerDay: number,
-    monthToDateUnits: number
+    monthToDateUnits: number,
+    isAway?: (date: string) => boolean
 ): Generator<DaySpend> | null {
     if (!(kwhPerDay > 0)) return null;
 
@@ -96,12 +101,18 @@ export function spendDays(
                 price = laterMonths;
             }
 
+            const date = cursor.toISOString().slice(0, 10);
+            if (isAway?.(date)) {
+                yield { date, month, kwh: 0, cost: 0 };
+                continue;
+            }
+
             const cost = price(units, units + kwhPerDay);
             // A curve that prices a day at nothing cannot project anything.
             if (!(cost > 0)) return;
 
             units += kwhPerDay;
-            yield { date: cursor.toISOString().slice(0, 10), month, kwh: kwhPerDay, cost };
+            yield { date, month, kwh: kwhPerDay, cost };
         }
     })();
 }

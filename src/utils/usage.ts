@@ -2,10 +2,13 @@ import {
     DailyConsumption,
     DescoResponse,
     FetchBalanceParams,
+    RechargeRecord,
     fetchBalance,
     fetchDailyConsumption,
+    fetchRechargeHistory,
 } from "../desco";
 import { projectRunway, monthToDateUnits } from "../domain/runway";
+import { PendingCharges, RechargeTerms, deriveRechargeTerms, pendingCharges } from "../domain/recharge";
 import { staleAsOf } from "../descoStore";
 import { shiftDate, todayInBillingZone } from "./dates";
 
@@ -209,7 +212,16 @@ export interface BalanceReport {
     usage: UsageSummary | null;
     /** The daily readings behind `usage`, so any further projection uses the same inputs. */
     rows: DailyConsumption[] | null;
+    /** The last year's recharges; null when DESCO could not supply them. */
+    recharges: RechargeRecord[] | null;
+    /** How a recharge converts to energy, measured from `recharges`. */
+    terms: RechargeTerms;
+    /** Fixed charges the next recharge will take first; null when none are owed or unknown. */
+    pending: PendingCharges | null;
 }
+
+/** Recharges looked at: enough to measure the charges and find the last payment. */
+const RECHARGE_WINDOW_DAYS = 365;
 
 /**
  * Fetches the balance and, when possible, the recent daily series to derive a
@@ -232,6 +244,15 @@ export async function getBalanceReport(params: FetchBalanceParams): Promise<{
     }
 
     const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, TARIFF_WINDOW_DAYS);
+    const today = todayInBillingZone();
+
+    // Asked for alongside the daily series, not after it. Without them the
+    // balance is still reported, just without the charges a recharge will pay.
+    const rechargesPromise = fetchRechargeHistory(params, shiftDate(today, -RECHARGE_WINDOW_DAYS), today, result.prefix)
+        .catch((error: any) => {
+            console.error("Failed to load recharge history:", error.message);
+            return null;
+        });
 
     let usage: UsageSummary | null = null;
     let rows: DailyConsumption[] | null = null;
@@ -260,7 +281,11 @@ export async function getBalanceReport(params: FetchBalanceParams): Promise<{
         console.error("Failed to derive usage summary:", error.message);
     }
 
-    return { success: true, report: { data: result.data, usage, rows } };
+    const recharges = await rechargesPromise;
+    const terms = deriveRechargeTerms(recharges ?? []);
+    const pending = recharges ? pendingCharges(terms, today.slice(0, 7)) : null;
+
+    return { success: true, report: { data: result.data, usage, rows, recharges, terms, pending } };
 }
 
 /** Short "8 Oct" style date. Dates from DESCO are parsed as UTC midnight. */
@@ -279,7 +304,8 @@ export function formatDayMonth(date: Date): string {
 export function formatBalanceMessage(
     data: DescoResponse,
     usage: UsageSummary | null,
-    heading?: string
+    heading?: string,
+    pending?: PendingCharges | null
 ): string {
     const lines: string[] = [];
 
@@ -307,6 +333,10 @@ export function formatBalanceMessage(
         // only to the 23rd left people asking which day it referred to.
         `📅 <b>Balance date:</b> <code>${formatDayMonth(new Date(Date.parse(data.readingTime)))}</code>`
     );
+
+    if (pending) {
+        lines.push(...pendingChargeLines(pending));
+    }
 
     if (usage) {
         lines.push("", forecastNote(usage));
@@ -392,16 +422,64 @@ export function isLowBalance(
     return usage !== null && usage.daysRemaining <= thresholdDays;
 }
 
+/** "Sep" for "2026-09". */
+function monthLabel(month: string): string {
+    return new Date(`${month}-01T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" });
+}
+
+/**
+ * The fixed charges waiting for the next recharge.
+ *
+ * DESCO takes each month's demand charge from the first recharge made in or
+ * after that month, never from the balance on the meter. A household that
+ * skipped a month (away, or the balance lasted) found its next recharge buying
+ * far less power than usual with nothing explaining why.
+ */
+function pendingChargeLines(pending: PendingCharges): string[] {
+    const months = pending.months.map(monthLabel).join(", ");
+    const amount = `<code>${pending.amountBDT.toFixed(2)} BDT</code>`;
+
+    if (pending.months.length === 1) {
+        return [`🧾 <b>Fixed charge due:</b> ${amount} (${months}), taken from your next recharge first`];
+    }
+
+    return [
+        `🧾 <b>Fixed charges due:</b> ${amount} (${months}), taken from your next recharge first`,
+        `<i>Each month without a recharge adds one more. There is no late fee, but a recharge ` +
+        `has to be larger than this to add any power.</i>`,
+    ];
+}
+
 export function formatLowBalanceAlert(
     balance: number,
     usage: UsageSummary | null,
-    thresholdTaka: number
+    thresholdTaka: number,
+    pending?: PendingCharges | null
 ): string {
     const runway = usage
         ? ` — about <b>${Math.floor(usage.daysRemaining)} days</b> left at ${usage.takaPerDay.toFixed(2)} BDT/day`
         : ` (threshold: ${thresholdTaka} BDT)`;
 
-    return `<b>⚠️ Low Balance Alert!</b>\n\n` +
-        `Your balance is <code>${balance.toFixed(2)} BDT</code>${runway}.\n\n` +
-        `Recharge soon to avoid disconnection.`;
+    const lines = [
+        `<b>⚠️ Low Balance Alert!</b>`,
+        "",
+        `Your balance is <code>${balance.toFixed(2)} BDT</code>${runway}.`,
+        "",
+        "Recharge soon to avoid disconnection.",
+    ];
+
+    if (pending) {
+        lines.push("", ...pendingChargeLines(pending));
+    }
+
+    // What to do if it does run out, since that is when people need it and
+    // are least likely to have it to hand.
+    lines.push(
+        "",
+        "<i>🆘 If it runs out: press the meter's emergency button for emergency balance. DESCO does not " +
+        "cut power between 4 pm and 10 am, on Fridays and Saturdays, or on government holidays. The " +
+        "emergency amount comes back out of your next recharge, with no interest.</i>"
+    );
+
+    return lines.join("\n");
 }

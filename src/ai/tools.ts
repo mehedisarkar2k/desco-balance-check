@@ -2,16 +2,19 @@ import { Type } from "@google/genai";
 import type { FunctionDeclaration } from "@google/genai";
 import { UserService } from "../services/UserService";
 import { User } from "../models/User";
-import { fetchCustomerInfo, fetchMonthlyConsumption, fetchDailyConsumption, fetchRechargeHistory } from "../desco";
+import { fetchCustomerInfo, fetchMonthlyConsumption, fetchDailyConsumption } from "../desco";
 import { buildMonthCurves, describeTariff } from "../domain/tariff";
 import { monthToDateUnits, spendDays } from "../domain/runway";
 import {
+    PendingCharges,
     RechargeTerms,
     amountFor,
+    chargesFor,
     creditFor,
-    deriveRechargeTerms,
     forecastThrough,
-    paysMonthlyCharge,
+    monthsAfter,
+    monthsOwed,
+    nextMonth,
     runsOutOn,
 } from "../domain/recharge";
 import { consumptionRange, TARIFF_WINDOW_DAYS, todayInBillingZone, dailyDeltas, DailyDelta } from "../utils/usage";
@@ -90,10 +93,42 @@ const round2 = (value: number) => Math.round(value * 100) / 100;
 /** Rounded up to the next 10 taka, the way people actually pay. */
 const roundUpTo10 = (value: number) => Math.ceil(value / 10) * 10;
 
-/** The first day of the month after the one `date` is in, as YYYY-MM-DD. */
-function firstOfNextMonth(date: string): string {
-    const [year, month] = date.split("-").map(Number);
-    return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+/** The last day of the month `month` (YYYY-MM), as YYYY-MM-DD. */
+function lastDayOf(month: string): string {
+    const [year, m] = month.split("-").map(Number);
+    return new Date(Date.UTC(year, m, 0)).toISOString().slice(0, 10);
+}
+
+const isDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
+
+/** Days the house is empty, both ends included. */
+interface Away {
+    from: string;
+    until: string;
+}
+
+/** Reads awayFrom/awayUntil from a tool call: absent, valid, or an error to hand back. */
+function parseAway(args: any, today: string): Away | null | { error: string } {
+    const from = String(args?.awayFrom ?? "").trim();
+    const until = String(args?.awayUntil ?? "").trim();
+    if (!from && !until) return null;
+
+    if (!isDate(from) || !isDate(until)) {
+        return { error: "awayFrom and awayUntil must both be dates in YYYY-MM-DD format." };
+    }
+    if (until < from) return { error: "awayUntil must be on or after awayFrom." };
+    if (until <= today) return { error: "The time away must end after today." };
+    if (from > shiftDate(today, 120)) return { error: "The time away must start within 120 days." };
+
+    return { from: from < today ? shiftDate(today, 1) : from, until };
+}
+
+/** Fixed charges as the model is given them. */
+function describeCharges(months: string[], terms: RechargeTerms) {
+    return {
+        months,
+        totalBDT: round2(months.length * (terms.monthlyChargeBDT ?? 0)),
+    };
 }
 
 interface ProjectionInputs {
@@ -101,8 +136,9 @@ interface ProjectionInputs {
     balanceDate: string;
     kwhPerDay: number;
     /** A fresh day-by-day spend sequence each call, since a generator can only be read once. */
-    days: () => Iterable<import("../domain/runway").DaySpend>;
+    days: (away?: Away | null) => Iterable<import("../domain/runway").DaySpend>;
     terms: RechargeTerms;
+    pending: PendingCharges | null;
     freshnessSources: unknown[];
 }
 
@@ -112,15 +148,10 @@ interface ProjectionInputs {
  * X to reach the 31st" come from one projection and cannot disagree.
  */
 async function projectionInputs(params: { accountNo?: string; meterNo?: string }): Promise<ProjectionInputs | { error: string }> {
-    const today = todayInBillingZone();
-    const [report, recharges] = await Promise.all([
-        getBalanceReport(params),
-        fetchRechargeHistory(params, shiftDate(today, -365), today),
-    ]);
-
+    const report = await getBalanceReport(params);
     if (!report.success || !report.report) return { error: report.error ?? "Could not reach DESCO" };
 
-    const { data, usage, rows } = report.report;
+    const { data, usage, rows, recharges, terms, pending } = report.report;
     if (!usage || !rows) return { error: "Not enough daily readings to project usage yet." };
 
     const units = monthToDateUnits(rows, data.readingTime);
@@ -133,24 +164,45 @@ async function projectionInputs(params: { accountNo?: string; meterNo?: string }
         balance: data.balance,
         balanceDate: data.readingTime,
         kwhPerDay: usage.kwhPerDay,
-        days: () => spendDays(rows, data.readingTime, usage.kwhPerDay, units) ?? [],
-        terms: deriveRechargeTerms(recharges ?? []),
+        days: (away) => {
+            const isAway = away ? (date: string) => date >= away.from && date <= away.until : undefined;
+            return spendDays(rows, data.readingTime, usage.kwhPerDay, units, isAway) ?? [];
+        },
+        terms,
+        pending,
         freshnessSources: [data, rows, recharges],
     };
 }
 
 /** The assumptions behind every recharge figure, stated so the model can pass them on. */
-function rechargeAssumptions(inputs: ProjectionInputs): string[] {
+function rechargeAssumptions(inputs: ProjectionInputs, away?: Away | null): string[] {
     const { terms } = inputs;
     return [
         `Use continues at ${inputs.kwhPerDay.toFixed(2)} kWh a day, the average of the last 14 days. More use, e.g. more AC, needs more.`,
+        ...(away ? [`No use at all from ${away.from} to ${away.until}, while the house is empty.`] : []),
         "Each day is priced with the slab rates found in this account's own readings; the rate resets on the 1st.",
         `${(terms.energyShare * 100).toFixed(2)}% of each taka recharged becomes energy credit` +
-            (terms.derived ? " (measured from past recharges)." : " (standard VAT less rebate; no past recharge to measure it from)."),
+            (terms.derived ? " (measured from past recharges)." : " (5% VAT less the 0.5% rebate; no past recharge to measure it from)."),
         terms.monthlyChargeBDT !== null
-            ? `The first recharge in a month also pays that month's fixed charge of ${terms.monthlyChargeBDT.toFixed(2)} BDT.`
+            ? `Every calendar month has a fixed charge of ${terms.monthlyChargeBDT.toFixed(2)} BDT, even a month ` +
+              "with no use. It is never taken from the balance. The first recharge made in or after a month pays " +
+              "it, along with every earlier month that had no recharge. There is no late fee on it."
             : "The fixed monthly charge could not be measured from past recharges, so it is not included.",
     ];
+}
+
+/**
+ * Warns when a recharge would first pay several months of fixed charges.
+ * What DESCO does with a recharge smaller than the charges owed is not
+ * documented, so the advice is to stay well above them.
+ */
+function arrearsNote(months: string[], terms: RechargeTerms): string | undefined {
+    if (months.length < 2 || terms.monthlyChargeBDT === null) return undefined;
+    return (
+        `This recharge first pays ${months.length} months of fixed charges ` +
+        `(${round2(months.length * terms.monthlyChargeBDT)} BDT) before any power. A recharge smaller than ` +
+        "that adds no power, and DESCO does not say how it treats one, so recharge well above it."
+    );
 }
 
 /**
@@ -186,7 +238,7 @@ const TOOLS: Record<string, Tool> = {
                 return { error: result.error ?? "Could not reach DESCO" };
             }
 
-            const { data, usage } = result.report;
+            const { data, usage, pending, terms } = result.report;
             const yesterday = shiftDate(todayInBillingZone(), -1);
             const latest = usage?.latestDay;
 
@@ -205,6 +257,14 @@ const TOOLS: Record<string, Tool> = {
                 avgDailyKwh: usage ? Number(usage.kwhPerDay.toFixed(2)) : null,
                 avgDailyBDT: usage ? Number(usage.takaPerDay.toFixed(2)) : null,
                 tariffAware: usage?.tariffAware ?? false,
+                fixedChargesDueNextRecharge: pending
+                    ? {
+                        ...describeCharges(pending.months, terms),
+                        note:
+                            "Taken from the next recharge before any power, never from this balance. Each month " +
+                            "without a recharge adds one more. No late fee.",
+                    }
+                    : null,
             }, data);
         },
     },
@@ -230,9 +290,9 @@ const TOOLS: Record<string, Tool> = {
 
             // The exact message the scheduled reminder sends, so asking for it
             // in chat gets the same thing rather than the model's paraphrase.
-            const { data, usage } = result.report;
+            const { data, usage, pending } = result.report;
             return withFreshness({
-                displayMessage: registerDisplay(ctx.session, formatBalanceMessage(data, usage, "🔔 Balance Update")),
+                displayMessage: registerDisplay(ctx.session, formatBalanceMessage(data, usage, "🔔 Balance Update", pending)),
                 balanceBDT: data.balance,
                 balanceDate: data.readingTime,
             }, data);
@@ -245,16 +305,27 @@ const TOOLS: Record<string, Tool> = {
             name: "plan_recharge",
             description:
                 "Works out how much to recharge so the power lasts until a given date: the end of this or next " +
-                "month, or until a trip. Projects day-by-day use at the recent average, priced with the slab rates " +
-                "(which reset on the 1st), spends the current balance first, and adds what a recharge loses to VAT " +
-                "and to the fixed monthly charge taken from the first recharge in a month. Use it for every question " +
-                "about how much to recharge or load.",
+                "month, or past a trip. Projects day-by-day use at the recent average, priced with the slab rates " +
+                "(which reset on the 1st), with no use on days away. Spends the current balance first, and adds " +
+                "what a recharge loses to VAT and to fixed monthly charges, including those of months with no " +
+                "recharge. Gives the amount for each month the recharge could be made in. Use it for every " +
+                "question about how much to recharge or load.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
                     until: {
                         type: Type.STRING,
                         description: "Last day to cover, YYYY-MM-DD. For all of next month, its last day.",
+                    },
+                    awayFrom: {
+                        type: Type.STRING,
+                        description:
+                            "Optional. First day the house will be empty (trip, holiday), YYYY-MM-DD. Those days " +
+                            "use no power. Give with awayUntil.",
+                    },
+                    awayUntil: {
+                        type: Type.STRING,
+                        description: "Optional. Last day away, YYYY-MM-DD; the day before the user is back.",
                     },
                 },
                 required: ["until"],
@@ -266,7 +337,7 @@ const TOOLS: Record<string, Tool> = {
 
             const until = String(args?.until ?? "").trim();
             const today = todayInBillingZone();
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(until) || Number.isNaN(Date.parse(until))) {
+            if (!isDate(until)) {
                 return { error: "until must be a date in YYYY-MM-DD format." };
             }
             if (until <= today) return { error: "until must be after today." };
@@ -274,43 +345,50 @@ const TOOLS: Record<string, Tool> = {
                 return { error: "Plans reach at most 120 days ahead; usage that far out is too uncertain to price." };
             }
 
+            const away = parseAway(args, today);
+            if (away && "error" in away) return away;
+
             const inputs = await projectionInputs(params);
             if ("error" in inputs) return inputs;
 
-            const forecast = forecastThrough(inputs.days(), until, inputs.balance);
+            const forecast = forecastThrough(inputs.days(away), until, inputs.balance);
             if (!forecast) return { error: "Could not project usage that far with the tariff found." };
 
             const { terms } = inputs;
             const creditNeeded = Math.max(0, forecast.totalBDT - inputs.balance);
             const thisMonth = today.slice(0, 7);
+            const coverMonth = until.slice(0, 7);
             const options: object[] = [];
 
-            if (creditNeeded > 0) {
-                const payNow = amountFor(terms, creditNeeded, thisMonth);
-                options.push({
-                    when: `today (${today})`,
-                    payBDT: round2(payNow),
-                    suggestedBDT: roundUpTo10(payNow),
-                    includesMonthlyChargeBDT: paysMonthlyCharge(terms, thisMonth) ? round2(terms.monthlyChargeBDT ?? 0) : 0,
-                    ...(until >= firstOfNextMonth(today) && terms.monthlyChargeBDT !== null
-                        ? {
-                            note:
-                                "A later month's fixed charge is not in this amount. It is taken from the first " +
-                                "recharge made after that month begins.",
-                        }
-                        : {}),
-                });
+            // The energy needed is the same whenever the recharge is made, but
+            // the fixed charges it pays depend on the month it is made in. It
+            // can be made any day from today until the balance runs out.
+            const runsOut = forecast.balanceRunsOutOn;
+            if (creditNeeded > 0 && runsOut) {
+                const lastDay = runsOut < until ? runsOut : until;
+                for (let month = thisMonth; month <= lastDay.slice(0, 7); month = nextMonth(month)) {
+                    const from = month === thisMonth ? today : `${month}-01`;
+                    const to = lastDayOf(month) < lastDay ? lastDayOf(month) : lastDay;
+                    const pay = amountFor(terms, creditNeeded, month);
+                    const paysFor = terms.monthlyChargeBDT !== null ? monthsOwed(terms, month) : [];
+                    const later = terms.monthlyChargeBDT !== null ? monthsAfter(month, coverMonth) : [];
 
-                // Waiting for the new month is possible only if the balance lasts into it.
-                const nextMonthStart = firstOfNextMonth(today);
-                const runsOut = forecast.balanceRunsOutOn;
-                if (runsOut && runsOut >= nextMonthStart && until >= nextMonthStart) {
-                    const payLater = amountFor(terms, creditNeeded, nextMonthStart.slice(0, 7));
                     options.push({
-                        when: `from ${nextMonthStart}, before the balance runs out on ${runsOut}`,
-                        payBDT: round2(payLater),
-                        suggestedBDT: roundUpTo10(payLater),
-                        includesMonthlyChargeBDT: paysMonthlyCharge(terms, nextMonthStart.slice(0, 7)) ? round2(terms.monthlyChargeBDT ?? 0) : 0,
+                        rechargeBetween: from === to ? from : `${from} and ${to}`,
+                        payBDT: round2(pay),
+                        suggestedBDT: roundUpTo10(pay),
+                        includesFixedCharges: describeCharges(paysFor, terms),
+                        ...(later.length
+                            ? {
+                                fixedChargesLeftForTheNextRecharge: {
+                                    ...describeCharges(later, terms),
+                                    note:
+                                        "Not in this amount and not taken from the balance. The next recharge after " +
+                                        "this one pays them first, before any power.",
+                                },
+                            }
+                            : {}),
+                        ...(arrearsNote(paysFor, terms) ? { warning: arrearsNote(paysFor, terms) } : {}),
                     });
                 }
             }
@@ -318,12 +396,13 @@ const TOOLS: Record<string, Tool> = {
             return withFreshness({
                 today,
                 coverUntil: until,
+                ...(away ? { awayFrom: away.from, awayUntil: away.until } : {}),
                 balanceBDT: inputs.balance,
                 balanceDate: inputs.balanceDate,
                 avgDailyKwh: round2(inputs.kwhPerDay),
                 forecastByMonth: forecast.months.map((m) => ({
                     month: m.month,
-                    days: m.days,
+                    daysWithUse: m.days,
                     kwh: round2(m.kwh),
                     costBDT: round2(m.costBDT),
                     paidByBalanceBDT: round2(m.paidByBalanceBDT),
@@ -333,7 +412,10 @@ const TOOLS: Record<string, Tool> = {
                 balanceLastsUntil: forecast.balanceRunsOutOn ?? `past ${until}; no recharge needed`,
                 energyCreditNeededBDT: round2(creditNeeded),
                 rechargeOptions: options,
-                assumptions: rechargeAssumptions(inputs),
+                ...(options.length === 0 && inputs.pending
+                    ? { fixedChargesDueNextRecharge: describeCharges(inputs.pending.months, terms) }
+                    : {}),
+                assumptions: rechargeAssumptions(inputs, away),
             }, ...inputs.freshnessSources);
         },
     },
@@ -344,12 +426,23 @@ const TOOLS: Record<string, Tool> = {
             name: "simulate_recharge",
             description:
                 "How long the power would last if the user recharged a given amount today: the energy credit the " +
-                "amount buys after VAT and any fixed monthly charge, and the new run-out date compared with not " +
-                "recharging. Use for 'if I recharge X, how long will it last' questions.",
+                "amount buys after VAT and the fixed monthly charges it pays first, and the new run-out date " +
+                "compared with not recharging. Can include days away with no use. Use for 'if I recharge X, how " +
+                "long will it last' questions.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
                     amountBDT: { type: Type.NUMBER, description: "Amount the user would pay, in BDT." },
+                    awayFrom: {
+                        type: Type.STRING,
+                        description:
+                            "Optional. First day the house will be empty (trip, holiday), YYYY-MM-DD. Those days " +
+                            "use no power. Give with awayUntil.",
+                    },
+                    awayUntil: {
+                        type: Type.STRING,
+                        description: "Optional. Last day away, YYYY-MM-DD; the day before the user is back.",
+                    },
                 },
                 required: ["amountBDT"],
             },
@@ -363,30 +456,43 @@ const TOOLS: Record<string, Tool> = {
                 return { error: "amountBDT must be a number between 1 and 100000." };
             }
 
+            const today = todayInBillingZone();
+            const away = parseAway(args, today);
+            if (away && "error" in away) return away;
+
             const inputs = await projectionInputs(params);
             if ("error" in inputs) return inputs;
 
             const { terms } = inputs;
-            const thisMonth = todayInBillingZone().slice(0, 7);
-            const charge = paysMonthlyCharge(terms, thisMonth) ? terms.monthlyChargeBDT ?? 0 : 0;
+            const thisMonth = today.slice(0, 7);
+            const paysFor = terms.monthlyChargeBDT !== null ? monthsOwed(terms, thisMonth) : [];
+            const charges = Math.min(amount, chargesFor(terms, thisMonth));
             const credit = creditFor(terms, amount, thisMonth);
-            const before = runsOutOn(inputs.days(), inputs.balance);
-            const after = runsOutOn(inputs.days(), inputs.balance + credit);
+            const before = runsOutOn(inputs.days(away), inputs.balance);
+            const after = runsOutOn(inputs.days(away), inputs.balance + credit);
             const extraDays = before && after
                 ? Math.round((Date.parse(after) - Date.parse(before)) / 86_400_000)
                 : null;
 
+            const warning = credit <= 0 && paysFor.length > 0
+                ? `${amount} BDT does not cover the fixed charges owed (${round2(chargesFor(terms, thisMonth))} BDT ` +
+                  "for " + paysFor.join(", ") + "), so it adds no power. DESCO does not say how it treats a recharge " +
+                  "smaller than the charges owed; advise recharging well above them."
+                : arrearsNote(paysFor, terms);
+
             return withFreshness({
                 amountBDT: amount,
                 energyCreditBDT: round2(credit),
-                monthlyChargeTakenBDT: round2(charge),
-                vatLessRebateBDT: round2(Math.max(0, amount - charge - credit)),
+                fixedChargesPaid: { ...describeCharges(paysFor, terms), takenFromThisAmountBDT: round2(charges) },
+                vatLessRebateBDT: round2(Math.max(0, amount - charges - credit)),
+                ...(warning ? { warning } : {}),
+                ...(away ? { awayFrom: away.from, awayUntil: away.until } : {}),
                 balanceNowBDT: inputs.balance,
                 balanceAfterBDT: round2(inputs.balance + credit),
                 lastsUntilWithoutRecharge: before,
                 lastsUntilWithRecharge: after ?? "more than 400 days",
                 extraDays,
-                assumptions: rechargeAssumptions(inputs),
+                assumptions: rechargeAssumptions(inputs, away),
             }, ...inputs.freshnessSources);
         },
     },

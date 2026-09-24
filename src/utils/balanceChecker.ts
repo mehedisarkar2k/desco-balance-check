@@ -24,9 +24,9 @@ export async function performBalanceCheck(
     });
 
     if (result.success && result.report) {
-        const { data, usage } = result.report;
+        const { data, usage, pending } = result.report;
         await ctx.reply(
-            formatBalanceMessage(data, usage, "✅ DESCO Balance"),
+            formatBalanceMessage(data, usage, "✅ DESCO Balance", pending),
             { parse_mode: "HTML" }
         );
         return;

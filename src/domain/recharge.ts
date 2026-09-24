@@ -2,36 +2,50 @@ import { RechargeRecord } from "../desco";
 import { DaySpend } from "./runway";
 
 /**
- * How a recharge turns into energy credit, recovered from the customer's own
- * recharge history rather than assumed.
+ * How a recharge turns into energy credit, and which fixed charges it pays.
  *
- * Every DESCO recharge seen follows one rule: a fixed share of the amount
- * becomes credit (the rest is VAT, less a rebate), and the first recharge of
- * each month also pays that month's fixed demand charge. On the account this
- * was built against the share was 0.95712 on every recharge and the monthly
- * charge 175.53 BDT in each of twelve months. The charge depends on the
- * connection's sanctioned load, so it is read per account, never hardcoded.
+ * The rules, from BERC's 2026 retail tariff order and the Power Division's
+ * statement on prepaid meters, and confirmed against this account's receipts:
+ *
+ *   - The amount paid includes 5% VAT.
+ *   - A 0.5% rebate on the amount before VAT is added back as energy.
+ *   - A fixed monthly demand charge (42 BDT per kW of sanctioned load) is
+ *     collected by recharges, never deducted from the balance on the meter.
+ *   - A month with no recharge still owes its charge. It builds up and the next
+ *     recharge collects every unpaid month at once. There is no late fee on
+ *     prepaid arrears; the 5% surcharge is a postpaid rule.
+ *
+ * So a recharge of T that pays k months' charges credits T x share - k x D,
+ * where D is the monthly demand charge. The share is measured from the
+ * account's own history (0.957119 on the account this was built against),
+ * and D is read per account because it depends on the sanctioned load.
  */
 export interface RechargeTerms {
     /** Share of each taka paid that becomes energy credit. */
     energyShare: number;
-    /** Fixed monthly charge taken from a month's first recharge; null if never observed. */
+    /**
+     * One month's fixed charge expressed as recharge money: the amount that
+     * has to be paid to cover it. Null if it could not be measured.
+     */
     monthlyChargeBDT: number | null;
-    /** Months (YYYY-MM) that already have a recharge, so their charge is paid. */
-    monthsWithRecharge: Set<string>;
+    /** The latest month (YYYY-MM) with a recharge; its charge and all earlier ones are paid. */
+    lastRechargeMonth: string | null;
     /** True when energyShare came from this account's history rather than the default. */
     derived: boolean;
 }
 
 /**
- * 5% VAT less a 0.5% prepaid rebate, which is what the observed share works
- * out to. Used only when an account has no recharge without a monthly charge
- * to measure it from.
+ * 5% VAT included in the amount, plus a 0.5% rebate on the amount before VAT,
+ * as the tariff order writes it: (1 / 1.05) x (1 + 0.005 / 1.005) = 0.957119.
+ * Used only when an account has no recharge to measure the share from.
  */
-const DEFAULT_ENERGY_SHARE = 1 / 1.045;
+const DEFAULT_ENERGY_SHARE = (1 / 1.05) * (1 + 0.005 / 1.005);
 
-/** A recharge whose charges are VAT alone runs at about 4.3%; anything well above carries the monthly charge. */
+/** A recharge whose charges are VAT alone runs at about 4.3%; well above that it paid fixed charges. */
 const VAT_ONLY_MAX_SHARE = 0.06;
+
+/** No recharge collects more than a year of unpaid charges in these calculations. */
+const MAX_MONTHS_OWED = 12;
 
 function median(values: number[]): number | null {
     if (values.length === 0) return null;
@@ -40,46 +54,106 @@ function median(values: number[]): number | null {
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-export function deriveRechargeTerms(recharges: RechargeRecord[]): RechargeTerms {
-    const usable = recharges.filter((r) => r.totalAmount > 0 && r.energyAmount > 0);
+export function nextMonth(month: string): string {
+    const [year, m] = month.split("-").map(Number);
+    return new Date(Date.UTC(year, m, 1)).toISOString().slice(0, 7);
+}
 
+/** Months strictly after `after`, up to and including `through`, oldest first. */
+export function monthsAfter(after: string, through: string): string[] {
+    const months: string[] = [];
+    for (let m = nextMonth(after); m <= through && months.length < MAX_MONTHS_OWED; m = nextMonth(m)) {
+        months.push(m);
+    }
+    return months;
+}
+
+export function deriveRechargeTerms(recharges: RechargeRecord[]): RechargeTerms {
     // Orders DESCO reports as "Not Returnd" are counted as applied: in this
-    // history the month after one such order recharged again without paying
-    // the monthly charge, so it had been taken.
-    const monthsWithRecharge = new Set(usable.map((r) => r.rechargeDate.slice(0, 7)));
+    // history the next recharge in the same month did not pay the fixed charge
+    // again, so it had been taken.
+    const usable = recharges
+        .filter((r) => r.totalAmount > 0 && r.energyAmount > 0)
+        .sort((a, b) => a.rechargeDate.localeCompare(b.rechargeDate));
 
     const vatOnly = usable.filter((r) => r.chargeAmount / r.totalAmount <= VAT_ONLY_MAX_SHARE);
     const share = median(vatOnly.map((r) => r.energyAmount / r.totalAmount));
     const energyShare = share ?? DEFAULT_ENERGY_SHARE;
 
-    const withCharge = usable
-        .filter((r) => r.chargeAmount / r.totalAmount > VAT_ONLY_MAX_SHARE)
-        .map((r) => r.totalAmount - r.energyAmount / energyShare)
-        .filter((charge) => charge > 20);
+    // Each recharge that paid fixed charges paid one per month since the
+    // previous recharge. Dividing by that count keeps a recharge that followed
+    // a skipped month from doubling the estimate of one month's charge.
+    const perMonth: number[] = [];
+    usable.forEach((r, i) => {
+        // DESCO's own charge lines are exact when present; otherwise the
+        // charge is what the amount lost beyond VAT and rebate.
+        const paid = r.chargeItems?.length
+            ? r.chargeItems.reduce((sum, item) => sum + item.amount, 0) / energyShare
+            : r.totalAmount - r.energyAmount / energyShare;
+        if (paid <= 20) return;
+
+        const previous = usable[i - 1];
+        const months = previous
+            ? monthsAfter(previous.rechargeDate.slice(0, 7), r.rechargeDate.slice(0, 7)).length
+            : 1;
+        if (months > 0) perMonth.push(paid / months);
+    });
+
+    const last = usable[usable.length - 1];
 
     return {
         energyShare,
-        monthlyChargeBDT: median(withCharge),
-        monthsWithRecharge,
+        monthlyChargeBDT: median(perMonth),
+        lastRechargeMonth: last ? last.rechargeDate.slice(0, 7) : null,
         derived: share !== null,
     };
 }
 
-/** Whether a recharge made in `month` would also pay that month's fixed charge. */
-export function paysMonthlyCharge(terms: RechargeTerms, month: string): boolean {
-    return !terms.monthsWithRecharge.has(month);
+/**
+ * The months whose fixed charge a recharge made in `month` would collect:
+ * every month after the last recharge, up to and including `month`.
+ */
+export function monthsOwed(terms: RechargeTerms, month: string): string[] {
+    // With no history the last payment is unknown, so only the recharge's own
+    // month is assumed.
+    if (!terms.lastRechargeMonth) return [month];
+    return monthsAfter(terms.lastRechargeMonth, month);
+}
+
+/** Fixed charges, in recharge money, that a recharge made in `month` would pay before any energy. */
+export function chargesFor(terms: RechargeTerms, month: string): number {
+    return monthsOwed(terms, month).length * (terms.monthlyChargeBDT ?? 0);
 }
 
 /** Energy credit a recharge of `amountBDT` made in `month` would add. */
 export function creditFor(terms: RechargeTerms, amountBDT: number, month: string): number {
-    const charge = paysMonthlyCharge(terms, month) ? terms.monthlyChargeBDT ?? 0 : 0;
-    return Math.max(0, (amountBDT - charge) * terms.energyShare);
+    return Math.max(0, (amountBDT - chargesFor(terms, month)) * terms.energyShare);
 }
 
 /** Amount to pay in `month` so that the recharge adds `creditBDT` of energy. */
 export function amountFor(terms: RechargeTerms, creditBDT: number, month: string): number {
-    const charge = paysMonthlyCharge(terms, month) ? terms.monthlyChargeBDT ?? 0 : 0;
-    return creditBDT / terms.energyShare + charge;
+    return creditBDT / terms.energyShare + chargesFor(terms, month);
+}
+
+export interface PendingCharges {
+    /** Months (YYYY-MM) whose fixed charge is unpaid and will come out of the next recharge. */
+    months: string[];
+    /** Their total, in recharge money. A recharge below this buys no power. */
+    amountBDT: number;
+}
+
+/**
+ * Fixed charges the next recharge will collect, from the months without a
+ * recharge so far, including the current one. Null when nothing is owed or
+ * the charge could not be measured.
+ */
+export function pendingCharges(terms: RechargeTerms, currentMonth: string): PendingCharges | null {
+    if (terms.monthlyChargeBDT === null || !terms.lastRechargeMonth) return null;
+
+    const months = monthsOwed(terms, currentMonth);
+    if (months.length === 0) return null;
+
+    return { months, amountBDT: months.length * terms.monthlyChargeBDT };
 }
 
 export interface MonthForecast {
@@ -118,7 +192,7 @@ export function forecastThrough(days: Iterable<DaySpend>, until: string, balance
             break;
         }
         total += day.cost;
-        if (runsOut === null && total >= balance) runsOut = day.date;
+        if (runsOut === null && day.cost > 0 && total >= balance) runsOut = day.date;
 
         // The balance is spent first, in date order.
         const fromBalance = Math.min(remaining, day.cost);
@@ -127,7 +201,7 @@ export function forecastThrough(days: Iterable<DaySpend>, until: string, balance
         const entry = byMonth.get(day.month) ?? {
             month: day.month, days: 0, kwh: 0, costBDT: 0, paidByBalanceBDT: 0, leftForRechargeBDT: 0,
         };
-        entry.days += 1;
+        if (day.kwh > 0) entry.days += 1;
         entry.kwh += day.kwh;
         entry.costBDT += day.cost;
         entry.paidByBalanceBDT += fromBalance;
@@ -148,7 +222,7 @@ export function runsOutOn(days: Iterable<DaySpend>, balance: number, maxDays = 4
     for (const day of days) {
         remaining -= day.cost;
         count += 1;
-        if (remaining <= 0) return day.date;
+        if (day.cost > 0 && remaining <= 0) return day.date;
         if (count >= maxDays) return null;
     }
     return null;

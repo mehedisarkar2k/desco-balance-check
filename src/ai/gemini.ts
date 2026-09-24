@@ -87,16 +87,22 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "",
         "Money questions:",
         "- How much to recharge or load, for any date, month or trip: call plan_recharge with the last day",
-        "  to cover. How long a given recharge would last: call simulate_recharge.",
+        "  to cover. How long a given recharge would last: call simulate_recharge. If the user will be away",
+        "  (trip, village, holiday), pass awayFrom and awayUntil (the day before they are back) so those",
+        "  days use no power.",
         "- Use the numbers those tools return, as given. Never calculate a cost, rate or amount yourself,",
         "  and never scale one month's bill to another month: the tariff is banded, so cost is not",
         "  proportional to use.",
         "- The current balance is spent first, including on the rest of this month; the tools already",
         "  account for that. Do not subtract the balance again.",
         "- Say when the balance runs out, then give every entry in rechargeOptions, one line each: when to",
-        "  recharge and its suggestedBDT, noting when it includes the fixed monthly charge. Recharging",
-        "  now versus after the 1st differ by that charge, so leaving one out misleads. Add the first",
-        "  assumption in one short line.",
+        "  recharge (rechargeBetween) and its suggestedBDT, noting the fixed charges it includes. The months",
+        "  differ by those charges, so leaving one out misleads. Add the first assumption in one short line.",
+        "- Fixed monthly charges: every month has one, even a month with no use or no recharge. It is never",
+        "  taken from the balance; the next recharge pays every unpaid month first, before any power. When",
+        "  an option has fixedChargesLeftForTheNextRecharge, or a result has fixedChargesDueNextRecharge,",
+        "  say so in one line with the months and the total, so the user is not surprised by a small",
+        "  recharge. There is no late fee. Pass on any warning as given.",
         "- If asked how the current balance fits in, use forecastByMonth: paidByBalanceBDT is what the",
         "  balance covers in each month and leftForRechargeBDT what the recharge must cover. The balance",
         "  pays for the rest of this month first, then carries into the next.",
@@ -114,7 +120,10 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         language === "bn"
             ? "Language: the user's latest message is in Bangla or Banglish. Reply in Bangla script (বাংলা), never in Banglish or English."
             : "Language: the user's latest message is in English. Reply in English, even if earlier messages were in Bangla.",
-        "Keep numbers, dates, 'kWh' and 'BDT' as they are.",
+        // Converting to Bangla numerals is where figures went wrong: the
+        // month's 1112.15 BDT came out as ১১২.১৫.
+        "Keep numbers, dates, 'kWh' and 'BDT' as they are. Write every number with the digits 0-9 exactly as",
+        "the tool gave it, even in a Bangla reply; never convert it to Bangla numerals (০-৯).",
         "",
         "Formatting. Replies are sent as Telegram HTML:",
         "- Allowed: <b>bold</b>, <i>italic</i>, <code>code</code>, <pre>block</pre>. Nothing else.",
@@ -230,10 +239,22 @@ export async function askGemini(
         temperature: 0.3,
     };
 
+    let retriedEmpty = false;
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         const response = await ai.models.generateContent({ model: MODEL, contents, config });
 
         const calls = response.functionCalls ?? [];
+
+        // Now and then the model returns neither text nor a tool call, and
+        // "my balances" got the fallback reply. Asking again once answers it.
+        if (calls.length === 0 && !response.text?.trim() && !retriedEmpty) {
+            retriedEmpty = true;
+            console.warn(`Empty reply (finish: ${response.candidates?.[0]?.finishReason ?? "unknown"}); asking again`);
+            round -= 1;
+            continue;
+        }
+
         if (calls.length === 0) {
             let text = response.text?.trim() || FALLBACK.unclear[language];
 

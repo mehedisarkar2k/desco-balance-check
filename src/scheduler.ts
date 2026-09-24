@@ -72,7 +72,7 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
             return null;
         }
 
-        const { data, usage } = result.report;
+        const { data, usage, pending } = result.report;
         // ?? rather than ||: a threshold the user set to 0 is 0, not the default.
         const thresholdValue = user.threshold ?? threshold;
         const thresholdDays = user.thresholdDays ?? DEFAULT_THRESHOLD_DAYS;
@@ -98,7 +98,7 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
                 return data.balance;
             }
 
-            const sent = await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue));
+            const sent = await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue, pending));
             if (!sent) {
                 // Not delivered, so give the claim back and let a later check retry.
                 await UserService.setLastLowAlertReadingDate(userId, user.lastLowAlertReadingDate ?? null);
@@ -106,10 +106,10 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
             return data.balance;
         }
 
-        const delivered = await sendTo(userId, formatBalanceMessage(data, usage, "🔔 Scheduled Update"));
+        const delivered = await sendTo(userId, formatBalanceMessage(data, usage, "🔔 Scheduled Update", pending));
 
         if (delivered && low) {
-            await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue));
+            await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue, pending));
         }
 
         return data.balance;
