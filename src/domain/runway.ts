@@ -1,8 +1,8 @@
 import { DailyConsumption } from "../desco";
 import {
-    MonthCurve,
+    MonthPricing,
     buildMonthCurves,
-    costBetween,
+    pricingFor,
     referenceCurve,
 } from "./tariff";
 
@@ -35,25 +35,36 @@ function daysInMonth(date: Date): number {
     return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
 }
 
+/** One projected day of consumption and what it will cost. */
+export interface DaySpend {
+    /** YYYY-MM-DD. */
+    date: string;
+    /** YYYY-MM. */
+    month: string;
+    kwh: number;
+    cost: number;
+}
+
 /**
- * How long the balance lasts, priced against the tariff rather than at a flat
- * rate.
+ * Future days of consumption, each priced against the tariff, starting the
+ * day after `readingTime` and running for as long as the caller reads.
  *
  * A flat average is misleading here: the marginal rate climbs through a month
  * and resets on the 1st, so an estimate made late in the month assumes the
- * expensive band continues and reports a shorter runway than the customer
- * actually has. This walks forward a day at a time, charging each day at the
- * rate for that month's running total and starting the total again at each
- * month boundary.
+ * expensive band continues. Each day is charged at the rate for that month's
+ * running total, and the total starts again at each month boundary.
+ *
+ * The runway and the recharge planner both read this one sequence, so the
+ * date a balance runs out and the amount needed to reach a date can never
+ * disagree. Returns null when no tariff curve can be built.
  */
-export function projectRunway(
+export function spendDays(
     rows: DailyConsumption[],
-    balance: number,
     readingTime: string,
     kwhPerDay: number,
     monthToDateUnits: number
-): Runway | null {
-    if (!(kwhPerDay > 0) || !Number.isFinite(balance)) return null;
+): Generator<DaySpend> | null {
+    if (!(kwhPerDay > 0)) return null;
 
     const start = new Date(Date.parse(readingTime));
     if (Number.isNaN(start.getTime())) return null;
@@ -63,43 +74,78 @@ export function projectRunway(
     const current = curves.find((curve) => curve.month === currentMonth) ?? null;
     const reference = referenceCurve(curves, currentMonth);
 
-    if (!current && !reference) {
-        return null;
-    }
+    if (!current && !reference) return null;
+
+    const thisMonth = pricingFor(current, reference)!;
+    const laterMonths = pricingFor(null, reference ?? current)!;
+
+    return (function* () {
+        let cursor = new Date(start.getTime());
+        let units = monthToDateUnits;
+        let month = monthKey(cursor);
+        let price: MonthPricing = thisMonth;
+
+        while (true) {
+            cursor = new Date(cursor.getTime() + DAY_MS);
+
+            // A new month restarts the tariff, so the running total resets and
+            // pricing moves to a curve that covers a whole month.
+            if (monthKey(cursor) !== month) {
+                month = monthKey(cursor);
+                units = 0;
+                price = laterMonths;
+            }
+
+            const cost = price(units, units + kwhPerDay);
+            // A curve that prices a day at nothing cannot project anything.
+            if (!(cost > 0)) return;
+
+            units += kwhPerDay;
+            yield { date: cursor.toISOString().slice(0, 10), month, kwh: kwhPerDay, cost };
+        }
+    })();
+}
+
+/** How long the balance lasts, priced against the tariff rather than at a flat rate. */
+export function projectRunway(
+    rows: DailyConsumption[],
+    balance: number,
+    readingTime: string,
+    kwhPerDay: number,
+    monthToDateUnits: number
+): Runway | null {
+    if (!Number.isFinite(balance)) return null;
+
+    const days = spendDays(rows, readingTime, kwhPerDay, monthToDateUnits);
+    if (!days) return null;
+
+    const curves = buildMonthCurves(rows);
+    const currentMonth = readingTime.slice(0, 7);
+    const pricing = pricingFor(
+        curves.find((c) => c.month === currentMonth) ?? null,
+        referenceCurve(curves, currentMonth)
+    )!;
+    const takaPerDayNow = pricing(monthToDateUnits, monthToDateUnits + kwhPerDay);
 
     let remaining = balance;
-    let cursor = new Date(start.getTime());
-    let units = monthToDateUnits;
-    let month = monthKey(cursor);
-    let curve: MonthCurve = current ?? reference!;
-    let days = 0;
+    let count = 0;
+    let last: DaySpend | null = null;
 
-    const takaPerDayNow = costBetween(curve, units, units + kwhPerDay);
-
-    while (remaining > 0 && days < MAX_PROJECTION_DAYS) {
-        cursor = new Date(cursor.getTime() + DAY_MS);
-
-        // A new month restarts the tariff, so the running total resets and
-        // pricing moves to a curve that covers a whole month.
-        if (monthKey(cursor) !== month) {
-            month = monthKey(cursor);
-            units = 0;
-            curve = reference ?? curve;
+    if (remaining > 0) {
+        for (const day of days) {
+            remaining -= day.cost;
+            count += 1;
+            last = day;
+            if (remaining <= 0 || count >= MAX_PROJECTION_DAYS) break;
         }
-
-        const cost = costBetween(curve, units, units + kwhPerDay);
-        if (!(cost > 0)) return null;
-
-        remaining -= cost;
-        units += kwhPerDay;
-        days += 1;
     }
 
-    if (days >= MAX_PROJECTION_DAYS) return null;
+    // Still money left: the projection ran past its horizon or could not price a day.
+    if (remaining > 0) return null;
 
     return {
-        days,
-        runoutDate: cursor,
+        days: count,
+        runoutDate: last ? new Date(Date.parse(last.date)) : new Date(Date.parse(readingTime)),
         kwhPerDay,
         takaPerDayNow,
         tariffAware: true,
@@ -115,7 +161,17 @@ export function monthToDateUnits(rows: DailyConsumption[], readingTime: string):
     const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date));
 
     const baselineIndex = sorted.findIndex((row) => row.date.slice(0, 7) === month);
-    if (baselineIndex <= 0) return null;
+
+    // No reading for this month yet: the 1st, before DESCO has published one.
+    // Nothing has been used in the month as far as the readings show, so it
+    // starts at zero. Giving up here made the forecast fall back to a flat
+    // rate at last month's expensive price, on exactly the day the reset
+    // matters most.
+    if (baselineIndex === -1) {
+        const latest = sorted[sorted.length - 1];
+        return latest && latest.date < `${month}-01` ? 0 : null;
+    }
+    if (baselineIndex === 0) return null;
 
     const baseline = sorted[baselineIndex - 1];
     if (baseline.date.slice(0, 7) === month) return null;

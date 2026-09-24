@@ -4,15 +4,26 @@ import { connectDatabase } from "./database";
 import { startHealthCheckServer } from "./health";
 import { startKeepAlive } from "./keepalive";
 import { autoRegisterMiddleware } from "./middleware/autoRegister";
-import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleSubscribe, handleUsage, handleRecharges } from "./handlers/commands";
+import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleSubscribe, handleUsage, handleRecharges, handleCancel, userSessions } from "./handlers/commands";
 import { handleCallbackQuery } from "./handlers/callbacks";
 import { handleTextMessage } from "./handlers/textMessages";
 import { startBotWithRetry, markShuttingDown } from "./utils/botLauncher";
 import { BOT_COMMANDS } from "./botCommands";
 import { offerVersionAnnouncement } from "./utils/announcer";
+import { escapeHtml } from "./utils/html";
 
 // Apply middleware
 bot.use(autoRegisterMiddleware);
+
+// A command means the user has moved on, so any half-finished guided step is
+// dropped before the command runs. Otherwise the step kept catching messages.
+bot.use(async (ctx, next) => {
+    const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
+    if (ctx.from && text.startsWith("/")) {
+        userSessions.delete(ctx.from.id);
+    }
+    await next();
+});
 
 // Global error handler for bot errors
 bot.catch(async (err: any, ctx: any) => {
@@ -20,7 +31,7 @@ bot.catch(async (err: any, ctx: any) => {
     try {
         await sendMessage(
             `🚨 <b>Bot Error</b>\n\n` +
-            `<b>Error:</b> ${err.message}\n` +
+            `<b>Error:</b> ${escapeHtml(err.message)}\n` +
             `<b>User:</b> ${ctx.from?.id || 'Unknown'}\n` +
             `<b>Update:</b> ${ctx.updateType}`,
             932626321 // Your admin chat ID
@@ -37,6 +48,7 @@ bot.command("me", handleMe);
 bot.command("update", handleUpdate);
 bot.command("balance", handleBalance);
 bot.command("usage", handleUsage);
+bot.command("cancel", handleCancel);
 bot.command("recharges", handleRecharges);
 bot.command("subscribe", handleSubscribe);
 
@@ -128,8 +140,8 @@ bot.on("text", handleTextMessage);
             await errorBot.telegram.sendMessage(
                 932626321,
                 `🚨 <b>Bot Startup Failed</b>\n\n` +
-                `<b>Error:</b> ${error.message}\n` +
-                `<b>Stack:</b> <code>${error.stack?.substring(0, 500)}</code>\n` +
+                `<b>Error:</b> ${escapeHtml(error.message)}\n` +
+                `<b>Stack:</b> <code>${escapeHtml(error.stack?.substring(0, 500))}</code>\n` +
                 `<b>Time:</b> ${new Date().toISOString()}`,
                 { parse_mode: "HTML" }
             );
@@ -148,8 +160,8 @@ process.on('uncaughtException', async (error) => {
     try {
         await sendMessage(
             `🚨 <b>Uncaught Exception</b>\n\n` +
-            `<b>Error:</b> ${error.message}\n` +
-            `<b>Stack:</b> <code>${error.stack?.substring(0, 500)}</code>`,
+            `<b>Error:</b> ${escapeHtml(error.message)}\n` +
+            `<b>Stack:</b> <code>${escapeHtml(error.stack?.substring(0, 500))}</code>`,
             932626321
         );
     } catch (err) {
@@ -166,8 +178,8 @@ process.on('unhandledRejection', async (reason: any) => {
     try {
         await sendMessage(
             `🚨 <b>Unhandled Promise Rejection</b>\n\n` +
-            `<b>Reason:</b> ${reason?.message || reason}\n` +
-            `<b>Stack:</b> <code>${reason?.stack?.substring(0, 500) || 'No stack trace'}</code>`,
+            `<b>Reason:</b> ${escapeHtml(reason?.message || reason)}\n` +
+            `<b>Stack:</b> <code>${escapeHtml(reason?.stack?.substring(0, 500) || 'No stack trace')}</code>`,
             932626321
         );
     } catch (err) {

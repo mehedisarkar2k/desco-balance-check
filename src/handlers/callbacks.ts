@@ -50,8 +50,6 @@ export async function handleCallbackQuery(ctx: Context) {
             return;
         }
 
-        console.log(`User ${userId} requesting balance with accountNo: ${user.accountNo}, meterNo: ${user.meterNo}`);
-
         await ctx.reply("Fetching balance using your saved account... ⏳");
         await performBalanceCheck(ctx, {
             accountNo: user.accountNo,

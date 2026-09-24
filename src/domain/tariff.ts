@@ -107,6 +107,34 @@ export function costUpTo(curve: MonthCurve, units: number): number {
     return last.taka + (units - last.units) * rate;
 }
 
+/** Prices consumption from one month-to-date level to another. */
+export type MonthPricing = (fromUnits: number, toUnits: number) => number;
+
+/**
+ * Prices a month from its own curve where it has readings, and from a
+ * completed month's curve beyond them.
+ *
+ * Early in a month the month's own readings only reach the lifeline, so its
+ * curve knows nothing of the dearer bands. Extending it at its last rate
+ * priced the whole month at 4.63 BDT/kWh and overstated the days a balance
+ * would last by about half in the first week. Past its last reading, the
+ * completed month shows what the next units actually cost, including the
+ * re-pricing when the lifeline is crossed.
+ */
+export function pricingFor(own: MonthCurve | null, reference: MonthCurve | null): MonthPricing | null {
+    if (!own && !reference) return null;
+    if (!own) return (from, to) => costBetween(reference!, from, to);
+    if (!reference || reference === own) return (from, to) => costBetween(own, from, to);
+
+    const lastOwn = own.points[own.points.length - 1].units;
+    const upTo = (units: number) =>
+        units <= lastOwn
+            ? costUpTo(own, units)
+            : costUpTo(own, lastOwn) + (costUpTo(reference, units) - costUpTo(reference, lastOwn));
+
+    return (from, to) => Math.max(0, upTo(to) - upTo(from));
+}
+
 /** Cost of consuming from `fromUnits` to `toUnits` within one month. */
 export function costBetween(curve: MonthCurve, fromUnits: number, toUnits: number): number {
     return Math.max(0, costUpTo(curve, toUnits) - costUpTo(curve, fromUnits));

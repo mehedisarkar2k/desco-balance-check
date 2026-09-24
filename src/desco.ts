@@ -2,8 +2,9 @@ import axios from "axios";
 import dotenv from "dotenv";
 import https from "https";
 import { AsyncLocalStorage } from "async_hooks";
-import { cachedSeries, isFresh, markStale, readSnapshot, writeSnapshot } from "./descoStore";
+import { cachedSeries, isFresh, markStale, readSnapshot, waitBriefly, writeSnapshot } from "./descoStore";
 import { previousMonthInBillingZone, shiftDate, todayInBillingZone } from "./utils/dates";
+import { maskNumber } from "./utils/html";
 
 dotenv.config();
 
@@ -64,6 +65,14 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const RETRY_DELAY_MS = 700;
 
 /**
+ * A hard limit on one request, counted from when it is issued. axios's own
+ * timeout only starts once the request has a connection, so requests queued
+ * behind a stalled handshake waited far longer than it suggested, and one
+ * stall held up every user queued behind it.
+ */
+const REQUEST_DEADLINE_MS = 30_000;
+
+/**
  * DESCO's server does not send its intermediate certificate, so Node cannot
  * build the chain and fails with UNABLE_TO_VERIFY_LEAF_SIGNATURE. Kept as a
  * single shared agent rather than one per request.
@@ -71,11 +80,10 @@ const RETRY_DELAY_MS = 700;
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false,
     keepAlive: true,
-    // One connection, shared. The handshake is the expensive part, and calls
-    // made at the same time would otherwise each open their own connection and
-    // each pay it. Queued behind a single socket, the first call pays once and
-    // the rest complete in milliseconds.
-    maxSockets: 1,
+    // Few connections, kept open and reused. The handshake is the expensive
+    // part, so calls share connections instead of each paying it. Two rather
+    // than one, so a single stalled handshake cannot hold up everyone.
+    maxSockets: 2,
 });
 
 const REQUEST_HEADERS = {
@@ -114,6 +122,9 @@ function prefixesFor(params: FetchBalanceParams, forced?: string): string[] {
 /** A timeout or dropped connection, as opposed to DESCO answering with an error. */
 function isTransient(error: any): boolean {
     if (error?.response) return false; // DESCO answered; not a network fault.
+    // The hard deadline passed: the request already used its full time, and
+    // retrying would only make the user wait that long again.
+    if (error?.code === "ERR_CANCELED") return false;
     return (
         error?.code === "ECONNABORTED" ||
         error?.code === "ETIMEDOUT" ||
@@ -145,6 +156,14 @@ export async function countDescoCalls<T>(work: () => Promise<T>): Promise<{ resu
     return { result, calls: counter.count };
 }
 
+/** A number from DESCO, or NaN when it is missing, so a gap is never read as zero. */
+function toNumber(value: unknown): number {
+    return value === null || value === undefined || value === "" ? NaN : Number(value);
+}
+
+/** Requests in progress, so identical ones issued together share a single call. */
+const inFlight = new Map<string, Promise<unknown>>();
+
 /**
  * Calls one endpoint on one prefix. Returns the `data` payload, or null if the
  * request failed or DESCO answered with a non-200 code in the body.
@@ -157,6 +176,22 @@ async function descoGet<T>(
 ): Promise<T | null> {
     const url = buildUrl(prefix, endpoint, query);
 
+    // The overview, the chat tools and the scheduler often ask for the same
+    // thing at once; the second caller waits on the first call instead of
+    // queueing another one behind it.
+    const pending = inFlight.get(url);
+    if (pending) return pending as Promise<T | null>;
+
+    const request = requestWithRetries<T>(url, prefix, endpoint, retries);
+    inFlight.set(url, request);
+    try {
+        return await request;
+    } finally {
+        inFlight.delete(url);
+    }
+}
+
+async function requestWithRetries<T>(url: string, prefix: string, endpoint: string, retries: number): Promise<T | null> {
     for (let attempt = 0; attempt <= retries; attempt++) {
         const counter = callCounter.getStore();
         if (counter) counter.count += 1;
@@ -164,6 +199,7 @@ async function descoGet<T>(
         try {
             const { data } = await axios.get(url, {
                 timeout: REQUEST_TIMEOUT_MS,
+                signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
                 httpsAgent,
                 headers: REQUEST_HEADERS,
                 validateStatus: (status) => status < 500,
@@ -182,7 +218,7 @@ async function descoGet<T>(
             const canRetry = attempt < retries && isTransient(error);
             console.error(
                 `Error calling ${prefix}/${endpoint}:`,
-                error.message,
+                error.code === "ERR_CANCELED" ? `no answer within ${REQUEST_DEADLINE_MS / 1000}s` : error.message,
                 canRetry ? "(retrying)" : ""
             );
             if (error.response) {
@@ -197,8 +233,12 @@ async function descoGet<T>(
     return null;
 }
 
-/** How long a saved copy is served without asking DESCO again. */
-const BALANCE_TTL_MS = 30 * 60 * 1000;
+/**
+ * How long a saved copy is served without asking DESCO again. The balance is
+ * kept briefly: after a recharge people check straight away, and a 30-minute
+ * copy showed them the balance from before it.
+ */
+const BALANCE_TTL_MS = 5 * 60 * 1000;
 const RECHARGE_TTL_MS = 30 * 60 * 1000;
 const DAILY_TTL_MS = 3 * 60 * 60 * 1000;
 const MONTHLY_TTL_MS = 12 * 60 * 60 * 1000;
@@ -248,7 +288,43 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
         return { success: true, prefix: stored.payload.prefix, data: stored.payload.data };
     }
 
-    console.log(`Fetching balance for Account: ${accountNo || 'N/A'}, Meter: ${meterNo || 'N/A'}`);
+    const live = fetchLiveBalance(params, key);
+
+    // With a saved copy to fall back on, a slow DESCO is not waited on in full:
+    // the copy is shown, marked with its time, and the live fetch carries on
+    // to refresh it for next time.
+    const outcome = stored ? await waitBriefly(live) : await live;
+
+    if (outcome !== "slow" && outcome.data) {
+        return { success: true, prefix: outcome.prefix, data: outcome.data };
+    }
+
+    if (stored) {
+        console.warn(`DESCO ${outcome === "slow" ? "slow" : "unavailable"}, serving saved balance from ${stored.fetchedAt.toISOString()}`);
+        return {
+            success: true,
+            prefix: stored.payload.prefix,
+            data: markStale({ ...stored.payload.data }, stored.fetchedAt),
+        };
+    }
+
+    const attemptedUrls = outcome === "slow" ? [] : outcome.attemptedUrls;
+    console.error(`❌ All API endpoints failed for account ${maskNumber(accountNo)}, meter ${maskNumber(meterNo)}`);
+
+    return {
+        success: false,
+        error: "Failed to fetch balance from both API endpoints",
+        attemptedUrls,
+    };
+}
+
+/** Fetches the balance from DESCO and saves it. */
+async function fetchLiveBalance(
+    params: FetchBalanceParams,
+    key: string
+): Promise<{ data?: DescoResponse; prefix?: string; attemptedUrls: string[] }> {
+    const { accountNo, meterNo } = params;
+    console.log(`Fetching balance for account ${maskNumber(accountNo)}, meter ${maskNumber(meterNo)}`);
 
     const attemptedUrls: string[] = [];
     const prefixes = prefixesFor(params);
@@ -264,39 +340,26 @@ export async function fetchBalance(params?: FetchBalanceParams): Promise<{
 
         // currentMonthConsumption may legitimately be null early in a month.
         if (balance === null || balance === undefined || !readingTime) {
-            console.warn(`Incomplete balance data from ${prefix}:`, data);
+            console.warn(`Incomplete balance data from ${prefix}`);
             continue;
         }
 
-        console.log(`✅ Successfully fetched balance for ${accountNo || meterNo} via ${prefix}`);
+        console.log(`✅ Fetched balance for ${maskNumber(accountNo || meterNo)} via ${prefix}`);
         prefixMemo.set(memoKey(params), prefix);
 
         const result: DescoResponse = {
             balance,
             currentMonthTaka: currentMonthConsumption ?? 0,
-            readingTime,
+            // Date only. Every consumer treats this as a calendar date, and a
+            // time part would be parsed in local time rather than UTC.
+            readingTime: String(readingTime).slice(0, 10),
         };
         await writeSnapshot(key, { data: result, prefix });
 
-        return { success: true, prefix, data: result };
+        return { data: result, prefix, attemptedUrls };
     }
 
-    if (stored) {
-        console.warn(`DESCO unavailable, serving saved balance from ${stored.fetchedAt.toISOString()}`);
-        return {
-            success: true,
-            prefix: stored.payload.prefix,
-            data: markStale({ ...stored.payload.data }, stored.fetchedAt),
-        };
-    }
-
-    console.error(`❌ All API endpoints failed for Account: ${accountNo}, Meter: ${meterNo}`);
-
-    return {
-        success: false,
-        error: "Failed to fetch balance from both API endpoints",
-        attemptedUrls,
-    };
+    return { attemptedUrls };
 }
 
 /**
@@ -335,11 +398,21 @@ export async function fetchDailyConsumption(
 
                 // An account on the wrong prefix answers 200 with an empty list here.
                 if (Array.isArray(rows) && rows.length > 0) {
-                    return rows.map((row) => ({
-                        date: row.date,
-                        consumedTaka: Number(row.consumedTaka),
-                        consumedUnit: Number(row.consumedUnit),
-                    }));
+                    // A missing reading must not become 0: Number(null) is 0,
+                    // and one zero meter reading turned the next day into a
+                    // 10,000 kWh day and the average with it.
+                    return rows
+                        .map((row) => ({
+                            date: row.date,
+                            consumedTaka: toNumber(row.consumedTaka),
+                            consumedUnit: toNumber(row.consumedUnit),
+                        }))
+                        .filter((row) =>
+                            Boolean(row.date) &&
+                            Number.isFinite(row.consumedTaka) &&
+                            Number.isFinite(row.consumedUnit) &&
+                            row.consumedUnit > 0
+                        );
                 }
             }
             return null;
@@ -398,9 +471,11 @@ export async function fetchMonthlyConsumption(
     months: number,
     prefix?: string
 ): Promise<MonthlyConsumption[] | null> {
-    const now = new Date();
-    const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    const from = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth() - (months - 1), 1));
+    // Counted from the month in Dhaka. Using the UTC date, between midnight
+    // and 06:00 on the 1st "last month" came out as the month before it.
+    const [year, month] = previousMonthInBillingZone().split("-").map(Number);
+    const to = new Date(Date.UTC(year, month - 1, 1));
+    const from = new Date(Date.UTC(year, month - 1 - (months - 1), 1));
     const asMonth = (date: Date) => date.toISOString().slice(0, 7);
 
     const query = {
@@ -463,9 +538,17 @@ export async function fetchRechargeHistory(
         dateOf: (row) => row.rechargeDate.slice(0, 10),
         sort: (a, b) => b.rechargeDate.localeCompare(a.rechargeDate),
         load: async () => {
+            // The system that does not hold an account can answer with an
+            // empty list rather than an error, so an empty answer only counts
+            // once every system has been asked.
+            let answeredEmpty = false;
             for (const candidate of prefixesFor(params, prefix)) {
                 const rows = await descoGet<any[]>(candidate, "getRechargeHistory", query);
                 if (!Array.isArray(rows)) continue;
+                if (rows.length === 0) {
+                    answeredEmpty = true;
+                    continue;
+                }
 
                 return rows.map((row) => ({
                     orderID: String(row.orderID),
@@ -477,7 +560,7 @@ export async function fetchRechargeHistory(
                     orderStatus: row.orderStatus,
                 }));
             }
-            return null;
+            return answeredEmpty ? [] : null;
         },
     });
 }

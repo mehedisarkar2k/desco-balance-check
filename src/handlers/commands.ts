@@ -3,13 +3,56 @@ import { UserService } from "../services/UserService";
 import { ADMIN_USERNAME } from "../bot";
 import { Markup } from "telegraf";
 import { formatCommandList } from "../botCommands";
+import { escapeHtml } from "../utils/html";
 
-export const userSessions = new Map<number, {
+interface GuidedStep {
     step: string;
     accountNo?: string;
     meterNo?: string;
     notificationTimes?: string[];
-}>();
+}
+
+/** How long a half-finished guided step waits for its answer. */
+const GUIDED_STEP_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Guided steps that lapse. They used to live forever: a user who abandoned
+ * "enter days" had every later message answered with "please enter a number",
+ * and chat could not be reached again until the process restarted.
+ */
+class ExpiringSteps extends Map<number, GuidedStep> {
+    private touched = new Map<number, number>();
+
+    set(userId: number, step: GuidedStep): this {
+        this.touched?.set(userId, Date.now());
+        return super.set(userId, step);
+    }
+
+    get(userId: number): GuidedStep | undefined {
+        const at = this.touched.get(userId);
+        if (at !== undefined && Date.now() - at > GUIDED_STEP_TTL_MS) {
+            this.delete(userId);
+            return undefined;
+        }
+        return super.get(userId);
+    }
+
+    delete(userId: number): boolean {
+        this.touched?.delete(userId);
+        return super.delete(userId);
+    }
+}
+
+export const userSessions = new ExpiringSteps();
+
+export async function handleCancel(ctx: Context) {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    // Any command already clears a pending step (see index.ts); this is the
+    // explicit way out that the error messages point to.
+    await ctx.reply("❌ Cancelled. Ask me anything, or use /help to see the commands.");
+}
 
 export async function handleStart(ctx: Context) {
     const userId = ctx.from?.id;
@@ -83,13 +126,13 @@ export async function handleMe(ctx: Context) {
     const infoText = `
 👤 <b>Your Account Information</b>
 
-<b>Name:</b> ${user.firstName || "N/A"} ${user.lastName || ""}
-<b>Username:</b> @${user.username || "N/A"}
+<b>Name:</b> ${escapeHtml(user.firstName || "N/A")} ${escapeHtml(user.lastName || "")}
+<b>Username:</b> @${escapeHtml(user.username || "N/A")}
 <b>Telegram ID:</b> <code>${user.telegramId}</code>
 
 📊 <b>DESCO Details:</b>
-<b>Account No:</b> <code>${user.accountNo || "Not set"}</code>
-<b>Meter No:</b> <code>${user.meterNo || "Not set"}</code>
+<b>Account No:</b> <code>${escapeHtml(user.accountNo || "Not set")}</code>
+<b>Meter No:</b> <code>${escapeHtml(user.meterNo || "Not set")}</code>
 
 🔔 <b>Subscription:</b> ${subscriptionStatus}
 <b>Notification Times:</b> ${notificationTimes}

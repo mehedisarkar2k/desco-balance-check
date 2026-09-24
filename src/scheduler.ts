@@ -4,6 +4,8 @@ import { UserService } from "./services/UserService";
 import { bot } from "./bot";
 import { IUser } from "./models/User";
 import { pruneSessions } from "./ai/session";
+import { escapeHtml } from "./utils/html";
+import { hourInBillingZone, parseTimes } from "./utils/times";
 import {
     getBalanceReport,
     formatBalanceMessage,
@@ -13,6 +15,36 @@ import {
 
 const threshold = Number(process.env.THRESHOLD) || 100;
 const DEFAULT_THRESHOLD_DAYS = 3;
+const TIMEZONE = process.env.TZ || "Asia/Dhaka";
+
+/**
+ * Hours in which the hourly low-balance check may message people. DESCO rolls
+ * the balance date over at midnight, which counts as a new reading, so without
+ * this a low balance woke users at about 00:15 every night. An alert held back
+ * overnight is sent by the first check after 08:00.
+ */
+const ALERT_HOURS = { from: 8, until: 22 };
+
+/**
+ * Sends a message, recording users Telegram reports as unreachable so they
+ * stop being polled. Returns false when the message did not go out.
+ */
+async function sendTo(userId: number, text: string): Promise<boolean> {
+    try {
+        await bot.telegram.sendMessage(userId, text, { parse_mode: "HTML" });
+        return true;
+    } catch (error: any) {
+        const code = error?.response?.error_code;
+        const description = String(error?.response?.description ?? error?.message ?? "");
+        if (code === 403 || /chat not found|user is deactivated/i.test(description)) {
+            await UserService.markBlocked(userId);
+            console.warn(`User ${userId} is unreachable; marked blocked`);
+        } else {
+            console.error(`Failed to message ${userId}:`, description);
+        }
+        return false;
+    }
+}
 
 const scheduledTasks: Map<string, cron.ScheduledTask> = new Map();
 
@@ -35,17 +67,14 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
             // Hourly checks run unattended; only the scheduled update reports failures,
             // otherwise a DESCO outage means 24 error messages a day.
             if (!isHourlyCheck) {
-                await bot.telegram.sendMessage(
-                    userId,
-                    `<b>❌ Error checking DESCO:</b> ${result.error || "Unknown error"}`,
-                    { parse_mode: "HTML" }
-                );
+                await sendTo(userId, `<b>❌ Error checking DESCO:</b> ${escapeHtml(result.error || "Unknown error")}`);
             }
             return null;
         }
 
         const { data, usage } = result.report;
-        const thresholdValue = user.threshold || threshold;
+        // ?? rather than ||: a threshold the user set to 0 is 0, not the default.
+        const thresholdValue = user.threshold ?? threshold;
         const thresholdDays = user.thresholdDays ?? DEFAULT_THRESHOLD_DAYS;
         const low = isLowBalance(data.balance, usage, thresholdValue, thresholdDays);
 
@@ -58,33 +87,29 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
                 return data.balance;
             }
 
-            // DESCO publishes one reading per day, so re-alerting on a reading
-            // already sent would repeat the same message every hour.
-            if (user.lastLowAlertReadingDate === data.readingTime) {
+            const hour = hourInBillingZone();
+            if (hour < ALERT_HOURS.from || hour >= ALERT_HOURS.until) {
                 return data.balance;
             }
 
-            await bot.telegram.sendMessage(
-                userId,
-                formatLowBalanceAlert(data.balance, usage, thresholdValue),
-                { parse_mode: "HTML" }
-            );
-            await UserService.setLastLowAlertReadingDate(userId, data.readingTime);
+            // One alert per DESCO reading, claimed atomically so overlapping
+            // runs cannot both send it.
+            if (!(await UserService.claimLowAlert(userId, data.readingTime))) {
+                return data.balance;
+            }
+
+            const sent = await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue));
+            if (!sent) {
+                // Not delivered, so give the claim back and let a later check retry.
+                await UserService.setLastLowAlertReadingDate(userId, user.lastLowAlertReadingDate ?? null);
+            }
             return data.balance;
         }
 
-        await bot.telegram.sendMessage(
-            userId,
-            formatBalanceMessage(data, usage, "🔔 Scheduled Update"),
-            { parse_mode: "HTML" }
-        );
+        const delivered = await sendTo(userId, formatBalanceMessage(data, usage, "🔔 Scheduled Update"));
 
-        if (low) {
-            await bot.telegram.sendMessage(
-                userId,
-                formatLowBalanceAlert(data.balance, usage, thresholdValue),
-                { parse_mode: "HTML" }
-            );
+        if (delivered && low) {
+            await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue));
         }
 
         return data.balance;
@@ -96,6 +121,17 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
 
 // Removed admin default balance check function and hourly alerts - all users must have their own accounts
 
+async function runReminders(time: string) {
+    console.log(`Running scheduled notifications for ${time}`);
+    const subscribedUsers = await UserService.getUsersByNotificationTime(time);
+
+    for (const user of subscribedUsers) {
+        await checkAndNotifyUser(user);
+        // Add delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+}
+
 // Setup user-specific notifications
 async function setupUserNotifications() {
     // Read first, then swap. Tearing the tasks down before this await would
@@ -104,7 +140,16 @@ async function setupUserNotifications() {
     const timeUserMap = new Map<string, number[]>();
 
     users.forEach(user => {
-        user.notificationTimes.forEach(time => {
+        user.notificationTimes.forEach(raw => {
+            // A malformed stored time is skipped, not scheduled. node-cron
+            // throws on "08:60", and one such value rejected the whole
+            // scheduler start-up, which exits the process: every restart then
+            // crashed the same way, for every user.
+            const time = parseTimes([raw])?.[0];
+            if (!time) {
+                console.warn(`Skipping invalid reminder time "${raw}" for user ${user.telegramId}`);
+                return;
+            }
             if (!timeUserMap.has(time)) {
                 timeUserMap.set(time, []);
             }
@@ -130,25 +175,25 @@ async function setupUserNotifications() {
         const [hour, minute] = time.split(":");
         const cronExpression = `${minute} ${hour} * * *`;
 
-        const task = cron.schedule(
-            cronExpression,
-            async () => {
-                console.log(`Running scheduled notifications for ${time}`);
-                const subscribedUsers = await UserService.getUsersByNotificationTime(time);
+        try {
+            const task = cron.schedule(cronExpression, () => runReminders(time), {
+                timezone: TIMEZONE,
+                noOverlap: true,
+            });
 
-                for (const user of subscribedUsers) {
-                    await checkAndNotifyUser(user);
-                    // Add delay to avoid rate limiting
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                }
-            },
-            {
-                timezone: process.env.TZ || "Asia/Dhaka",
-            }
-        );
+            // node-cron skips a run whose timer fires even a second late, and
+            // only logs it. For a once-a-day reminder that means no reminder
+            // that day, so a missed run is run straight away instead.
+            task.on("execution:missed", () => {
+                console.warn(`Reminder for ${time} fired late; running it now`);
+                runReminders(time).catch((error) => console.error(`Late reminder for ${time} failed:`, error));
+            });
 
-        scheduledTasks.set(time, task);
-        console.log(`✅ Scheduled notifications for ${time} (${userIds.length} users)`);
+            scheduledTasks.set(time, task);
+            console.log(`✅ Scheduled notifications for ${time} (${userIds.length} users)`);
+        } catch (error: any) {
+            console.error(`Could not schedule reminders for ${time}:`, error.message);
+        }
     });
 }
 
@@ -161,7 +206,8 @@ function scheduleRefresh() {
         console.log("Refreshing notification schedules...");
         await setupUserNotifications();
     }, {
-        timezone: process.env.TZ || "Asia/Dhaka"
+        timezone: TIMEZONE,
+        noOverlap: true,
     });
 }
 
@@ -180,11 +226,14 @@ async function checkHourlyLowBalance() {
 export async function startScheduler() {
     // Hourly checks for low balance alerts, offset from the hour so they don't
     // hit DESCO at the same instant as the scheduled updates.
+    // noOverlap: when DESCO is slow a run can outlast the hour, and a second
+    // run starting on top of it would check (and message) the same users.
     cron.schedule("15 * * * *", async () => {
         console.log("Running hourly low balance checks...");
         await checkHourlyLowBalance();
     }, {
-        timezone: process.env.TZ || "Asia/Dhaka"
+        timezone: TIMEZONE,
+        noOverlap: true,
     });
 
     // Idle chat sessions would otherwise accumulate for every user who ever
@@ -193,7 +242,7 @@ export async function startScheduler() {
         const removed = pruneSessions();
         if (removed > 0) console.log(`Pruned ${removed} idle chat session(s)`);
     }, {
-        timezone: process.env.TZ || "Asia/Dhaka"
+        timezone: TIMEZONE,
     });
 
     // Setup user notifications

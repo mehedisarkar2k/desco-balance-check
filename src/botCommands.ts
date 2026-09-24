@@ -18,6 +18,7 @@ export const BOT_COMMANDS = [
     { command: "update", description: "Update account info, notification times, or alerts" },
     { command: "subscribe", description: "Enable/disable automatic balance notifications" },
     { command: "help", description: "View all available commands and how to use them" },
+    { command: "cancel", description: "Stop the step you are in" },
 ] as const;
 
 export function formatCommandList(exclude: string[] = []): string {

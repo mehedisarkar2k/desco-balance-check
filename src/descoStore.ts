@@ -77,6 +77,33 @@ export async function writeSnapshot(key: string, payload: unknown, coveredFrom?:
     }
 }
 
+/**
+ * How long a request waits for DESCO when there is a saved copy to show
+ * instead. A healthy DESCO answers in well under a second; when its front-end
+ * struggles, handshakes take 5-15s, and users were left staring at "loading".
+ */
+export const SLOW_FALLBACK_MS = 6_000;
+
+/**
+ * The result if it arrives within `ms`, otherwise "slow". The work is not
+ * cancelled: it carries on and refreshes the saved copy in the background.
+ */
+export async function waitBriefly<T>(work: Promise<T>, ms = SLOW_FALLBACK_MS): Promise<T | "slow"> {
+    let timer: NodeJS.Timeout | undefined;
+    const slow = new Promise<"slow">((resolve) => {
+        timer = setTimeout(() => resolve("slow"), ms);
+    });
+
+    // Finishing in the background must never become an unhandled rejection.
+    work.catch((error) => console.error("Background DESCO refresh failed:", error?.message ?? error));
+
+    try {
+        return await Promise.race([work, slow]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 export function isFresh(fetchedAt: Date, ttlMs: number): boolean {
     return Date.now() - new Date(fetchedAt).getTime() < ttlMs;
 }
@@ -134,9 +161,10 @@ export async function cachedSeries<T extends object>(options: SeriesOptions<T>):
         return markFetched(inRange(storedRows), new Date(stored.fetchedAt));
     }
 
-    const live = await load();
+    const refresh = (async () => {
+        const live = await load();
+        if (live === null) return null;
 
-    if (live !== null) {
         const merged = new Map<string, T>();
         for (const row of storedRows) merged.set(idOf(row), row);
         for (const row of live) merged.set(idOf(row), row);
@@ -144,14 +172,29 @@ export async function cachedSeries<T extends object>(options: SeriesOptions<T>):
 
         const coveredFrom = stored?.coveredFrom && stored.coveredFrom < from ? stored.coveredFrom : from;
         await writeSnapshot(key, rows, coveredFrom);
+        return rows;
+    })();
 
-        return markFetched(inRange(rows), new Date());
+    // With a saved copy to fall back on, a slow DESCO is not waited on in full.
+    const outcome = stored ? await waitBriefly(refresh) : await refresh;
+
+    if (outcome !== "slow" && outcome !== null) {
+        return markFetched(inRange(outcome), new Date());
     }
 
     const fallback = inRange(storedRows);
     if (stored && fallback.length > 0) {
-        console.warn(`DESCO unavailable, serving saved ${key} from ${stored.fetchedAt.toISOString()}`);
+        console.warn(
+            `DESCO ${outcome === "slow" ? "slow" : "unavailable"}, serving saved ${key} ` +
+            `from ${new Date(stored.fetchedAt).toISOString()}`
+        );
         return markFetched(markStale(fallback, stored.fetchedAt), new Date(stored.fetchedAt));
+    }
+
+    // Slow, and nothing saved covers what was asked: wait for the answer after all.
+    if (outcome === "slow") {
+        const late = await refresh;
+        return late ? markFetched(inRange(late), new Date()) : null;
     }
 
     return null;

@@ -9,6 +9,7 @@ import {
 } from "../desco";
 import { fetchedAtOf, staleAsOf } from "../descoStore";
 import { shiftDate } from "./dates";
+import { escapeHtml } from "./html";
 import {
     DailyDelta,
     UsageSummary,
@@ -249,11 +250,26 @@ export function renderDailyTable(entries: DailyDelta[]): string {
         // Cost per unit for the day. This is where the banded tariff becomes
         // visible: the same kWh costs far more late in a month than early,
         // which the kWh and BDT columns alone do not reveal.
-        const rate = row.kwh > 0 ? (row.taka / row.kwh).toFixed(2) : "—";
-        return `${label.padEnd(10)}${row.kwh.toFixed(2).padStart(6)}${row.taka.toFixed(2).padStart(8)}${rate.padStart(7)}`;
+        const rate = row.kwh > 0 ? (row.taka / row.kwh).toFixed(2) + (row.slabChange ? "†" : "") : "—";
+        return `${label.padEnd(10)}${row.kwh.toFixed(2).padStart(6)}${row.taka.toFixed(2).padStart(8)}${rate.padStart(row.slabChange ? 8 : 7)}`;
     });
 
     return ["Date         kWh     BDT   Tariff", ...body].join("\n");
+}
+
+/** Footnotes for markers that appear in a day-by-day table. */
+function tableNotes(rows: DailyDelta[]): string[] {
+    const notes: string[] = [];
+    if (rows.some((row) => row.spanDays > 1)) {
+        notes.push("<i>* DESCO skipped a reading; that row covers several days.</i>");
+    }
+    if (rows.some((row) => row.slabChange)) {
+        notes.push(
+            "<i>† The slab changed that day, so the figure mixes rates and is not a DESCO tariff. " +
+            "Crossing 50 units in a month also re-prices the month's earlier units.</i>"
+        );
+    }
+    return notes;
 }
 
 /**
@@ -264,9 +280,7 @@ export function dailyTableHtml(entries: DailyDelta[]): string {
     const rows = entries.slice(-MAX_DAILY_ROWS);
     const lines = [`<pre>${renderDailyTable(rows)}</pre>`];
 
-    if (rows.some((row) => row.spanDays > 1)) {
-        lines.push("<i>* DESCO skipped a reading; that row covers several days.</i>");
-    }
+    lines.push(...tableNotes(rows));
     return lines.join("\n");
 }
 
@@ -274,7 +288,6 @@ function formatDailyTable(entries: DailyDelta[]): string[] {
     if (entries.length === 0) return [];
 
     const rows = entries.slice(-MAX_DAILY_ROWS);
-    const hasGap = rows.some((row) => row.spanDays > 1);
 
     const lines = [
         "",
@@ -286,9 +299,7 @@ function formatDailyTable(entries: DailyDelta[]): string[] {
     if (entries.length > rows.length) {
         lines.push(`<i>Showing the most recent ${rows.length} of ${entries.length} days.</i>`);
     }
-    if (hasGap) {
-        lines.push("<i>* DESCO skipped a reading; that row covers several days.</i>");
-    }
+    lines.push(...tableNotes(rows));
 
     return lines;
 }
@@ -322,6 +333,13 @@ export async function getRecharges(
 }
 
 
+/**
+ * Recharges listed individually. A year of history can run past Telegram's
+ * 4,096-character limit, which rejects the whole message and leaves the user
+ * with only "Loading...", so older ones are summarised.
+ */
+const MAX_RECHARGES_LISTED = 20;
+
 export function formatRechargeHistoryMessage(
     recharges: RechargeRecord[],
     requestedDays: number
@@ -333,29 +351,49 @@ export function formatRechargeHistoryMessage(
         return lines.join("\n");
     }
 
-    const total = recharges.reduce((sum, r) => sum + r.totalAmount, 0);
-    const energy = recharges.reduce((sum, r) => sum + r.energyAmount, 0);
-    const charges = recharges.reduce((sum, r) => sum + r.chargeAmount, 0);
+    // Totals count only orders DESCO reports as successful. Adding every
+    // order counted one that had not gone through as money paid.
+    const confirmed = recharges.filter((r) => /success/i.test(r.orderStatus));
+    const unconfirmed = recharges.filter((r) => !/success/i.test(r.orderStatus));
 
-    lines.push(
-        "",
-        `<b>Paid:</b> <code>${total.toFixed(2)} BDT</code> across ${recharges.length} recharge${recharges.length === 1 ? "" : "s"}`,
-        `⚡ <b>Became energy:</b> <code>${energy.toFixed(2)} BDT</code>`,
-        `🧾 <b>Charges &amp; VAT:</b> <code>${charges.toFixed(2)} BDT</code> (${((charges / total) * 100).toFixed(1)}%)`,
-        ""
-    );
+    const total = confirmed.reduce((sum, r) => sum + r.totalAmount, 0);
+    const energy = confirmed.reduce((sum, r) => sum + r.energyAmount, 0);
+    const charges = confirmed.reduce((sum, r) => sum + r.chargeAmount, 0);
+
+    lines.push("");
+    if (confirmed.length > 0) {
+        lines.push(
+            `<b>Paid:</b> <code>${total.toFixed(2)} BDT</code> across ${confirmed.length} recharge${confirmed.length === 1 ? "" : "s"}`,
+            `⚡ <b>Became energy:</b> <code>${energy.toFixed(2)} BDT</code>`,
+            `🧾 <b>Charges &amp; VAT:</b> <code>${charges.toFixed(2)} BDT</code>` +
+                (total > 0 ? ` (${((charges / total) * 100).toFixed(1)}%)` : "")
+        );
+    }
+    if (unconfirmed.length > 0) {
+        const pending = unconfirmed.reduce((sum, r) => sum + r.totalAmount, 0);
+        lines.push(
+            `⚠️ <b>${unconfirmed.length} order${unconfirmed.length === 1 ? "" : "s"} not confirmed</b> ` +
+            `(<code>${pending.toFixed(2)} BDT</code>, not counted above). Check ` +
+            `${unconfirmed.length === 1 ? "it" : "they"} reached your meter.`
+        );
+    }
+    lines.push("");
 
     const stale = staleNote(recharges);
 
-    for (const r of recharges) {
+    for (const r of recharges.slice(0, MAX_RECHARGES_LISTED)) {
         const date = formatDayMonth(new Date(Date.parse(r.rechargeDate.slice(0, 10))));
         const ok = /success/i.test(r.orderStatus);
 
         lines.push(
             `${ok ? "•" : "⚠️"} <b>${date}</b> — <code>${r.totalAmount.toFixed(2)} BDT</code>`,
             `   energy <code>${r.energyAmount.toFixed(2)}</code> · charges <code>${r.chargeAmount.toFixed(2)}</code>`,
-            `   via ${r.rechargeOperator}${ok ? "" : ` · <b>${r.orderStatus}</b>`}`
+            `   via ${escapeHtml(r.rechargeOperator)}${ok ? "" : ` · <b>${escapeHtml(r.orderStatus)}</b>`}`
         );
+    }
+
+    if (recharges.length > MAX_RECHARGES_LISTED) {
+        lines.push(`<i>…and ${recharges.length - MAX_RECHARGES_LISTED} older recharge(s).</i>`);
     }
 
     if (stale) {
@@ -372,7 +410,7 @@ function formatRechargeLine(recharge: RechargeRecord): string {
 
     return `  • ${date} — <code>${recharge.totalAmount.toFixed(0)} BDT</code> ` +
         `(energy <code>${recharge.energyAmount.toFixed(2)}</code>)` +
-        (failed ? ` ⚠️ ${recharge.orderStatus}` : "");
+        (failed ? ` ⚠️ ${escapeHtml(recharge.orderStatus)}` : "");
 }
 
 export function formatOverviewMessage(overview: Overview): string {

@@ -68,6 +68,16 @@ export interface DailyDelta {
     kwh: number;
     /** Days this step covers. Above 1 means readings were missing in between. */
     spanDays: number;
+    /**
+     * The slab changed during this day, so its cost per unit mixes two rates
+     * and is not a tariff DESCO charges. Crossing the 50-unit lifeline also
+     * re-prices every earlier unit of the month, which is how one day in
+     * September came out at "8.92 BDT/kWh" when no such rate exists.
+     */
+    slabChange?: boolean;
+    /** On a slab-change day, the rate on the neighbouring days before and after it. */
+    rateBefore?: number;
+    rateAfter?: number;
 }
 
 /**
@@ -79,7 +89,7 @@ export interface DailyDelta {
  */
 export function dailyDeltas(rows: DailyConsumption[]): DailyDelta[] {
     const sorted = rows
-        .filter((row) => row.date && Number.isFinite(row.consumedTaka))
+        .filter((row) => row.date && Number.isFinite(row.consumedTaka) && Number.isFinite(row.consumedUnit))
         .sort((a, b) => a.date.localeCompare(b.date));
 
     const deltas: DailyDelta[] = [];
@@ -106,7 +116,36 @@ export function dailyDeltas(rows: DailyConsumption[]): DailyDelta[] {
         });
     }
 
+    markSlabChanges(deltas);
     return deltas;
+}
+
+/**
+ * Flags days whose cost per unit matches neither neighbouring day in the same
+ * month. Within a slab consecutive days share a rate, so a day unlike both of
+ * its neighbours is one where the slab changed. Neighbours in another month do
+ * not count, since the rate resets on the 1st.
+ */
+function markSlabChanges(deltas: DailyDelta[]) {
+    const rate = (day: DailyDelta) => (day.kwh > 0 ? day.taka / day.kwh : NaN);
+    const same = (a: number, b: number) => Math.abs(a - b) <= Math.max(0.05, 0.02 * Math.abs(b));
+
+    deltas.forEach((day, i) => {
+        const own = rate(day);
+        if (!Number.isFinite(own)) return;
+
+        const month = day.date.slice(0, 7);
+        const inMonth = (n: DailyDelta | undefined): n is DailyDelta => Boolean(n) && n!.date.slice(0, 7) === month;
+        const before = inMonth(deltas[i - 1]) ? rate(deltas[i - 1]) : NaN;
+        const after = inMonth(deltas[i + 1]) ? rate(deltas[i + 1]) : NaN;
+        const neighbours = [before, after].filter(Number.isFinite);
+
+        if (neighbours.length > 0 && neighbours.every((other) => !same(own, other))) {
+            day.slabChange = true;
+            if (Number.isFinite(before)) day.rateBefore = Math.round(before * 100) / 100;
+            if (Number.isFinite(after)) day.rateAfter = Math.round(after * 100) / 100;
+        }
+    });
 }
 
 /**
@@ -168,6 +207,8 @@ export interface BalanceReport {
     data: DescoResponse;
     /** Null when the daily series is unavailable; the balance is still usable. */
     usage: UsageSummary | null;
+    /** The daily readings behind `usage`, so any further projection uses the same inputs. */
+    rows: DailyConsumption[] | null;
 }
 
 /**
@@ -193,8 +234,9 @@ export async function getBalanceReport(params: FetchBalanceParams): Promise<{
     const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, TARIFF_WINDOW_DAYS);
 
     let usage: UsageSummary | null = null;
+    let rows: DailyConsumption[] | null = null;
     try {
-        const rows = await fetchDailyConsumption(params, dateFrom, dateTo, result.prefix);
+        rows = await fetchDailyConsumption(params, dateFrom, dateTo, result.prefix);
         if (rows) {
             const rateStart = consumptionRange(result.data.readingTime, USAGE_WINDOW_DAYS + 1).dateFrom;
             const rateRows = rows.filter((row) => row.date >= rateStart);
@@ -218,7 +260,7 @@ export async function getBalanceReport(params: FetchBalanceParams): Promise<{
         console.error("Failed to derive usage summary:", error.message);
     }
 
-    return { success: true, report: { data: result.data, usage } };
+    return { success: true, report: { data: result.data, usage, rows } };
 }
 
 /** Short "8 Oct" style date. Dates from DESCO are parsed as UTC midnight. */

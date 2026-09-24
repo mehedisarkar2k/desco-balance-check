@@ -5,6 +5,7 @@ import { performBalanceCheck, performOverview } from "../utils/balanceChecker";
 import { refreshSchedules } from "../scheduler";
 import { MIN_OVERVIEW_DAYS, MAX_OVERVIEW_DAYS } from "../utils/overview";
 import { handleAiMessage } from "../ai";
+import { parseTimes } from "../utils/times";
 
 export async function handleTextMessage(ctx: Context) {
     const userId = ctx.from?.id;
@@ -82,7 +83,7 @@ export async function handleTextMessage(ctx: Context) {
 
         if (isNaN(days) || days < MIN_OVERVIEW_DAYS || days > MAX_OVERVIEW_DAYS) {
             await ctx.reply(
-                `❌ Please enter a number of days between ${MIN_OVERVIEW_DAYS} and ${MAX_OVERVIEW_DAYS} (e.g., 10)`
+                `❌ Please enter a number of days between ${MIN_OVERVIEW_DAYS} and ${MAX_OVERVIEW_DAYS} (e.g., 10), or /cancel to stop.`
             );
             return;
         }
@@ -113,10 +114,12 @@ export async function handleTextMessage(ctx: Context) {
 
         await ctx.reply("✅ Account details updated successfully!\n\nUse /me to view your updated information.");
     } else if (session.step === "update_notification_times") {
-        const times = text.split(",").map(t => t.trim()).filter(t => /^\d{2}:\d{2}$/.test(t));
+        // Validated in full rather than filtered: the old filter silently
+        // dropped some entries and let "08:60" through to the scheduler.
+        const times = parseTimes(text.split(","));
 
-        if (times.length === 0) {
-            await ctx.reply("❌ Invalid format. Please use HH:MM format (e.g., 08:00, 16:00)");
+        if (!times) {
+            await ctx.reply("❌ Please use 24-hour HH:MM times from 00:00 to 23:59, e.g. 08:00, 16:00 (or /cancel to stop).");
             return;
         }
 
@@ -129,7 +132,7 @@ export async function handleTextMessage(ctx: Context) {
         const threshold = parseInt(text);
 
         if (isNaN(threshold) || threshold < 0) {
-            await ctx.reply("❌ Please enter a valid number (e.g., 100)");
+            await ctx.reply("❌ Please enter a valid number (e.g., 100), or /cancel to stop.");
             return;
         }
 
@@ -141,7 +144,7 @@ export async function handleTextMessage(ctx: Context) {
         const days = parseInt(text);
 
         if (isNaN(days) || days < 0 || days > 60) {
-            await ctx.reply("❌ Please enter a number of days between 0 and 60 (e.g., 5)");
+            await ctx.reply("❌ Please enter a number of days between 0 and 60 (e.g., 5), or /cancel to stop.");
             return;
         }
 
@@ -157,12 +160,17 @@ export async function handleTextMessage(ctx: Context) {
         const threshold = parseInt(text);
 
         if (isNaN(threshold) || threshold < 0) {
-            await ctx.reply("❌ Please enter a valid number (e.g., 50) or 0 to disable");
+            await ctx.reply("❌ Please enter a valid number (e.g., 50), 0 to disable, or /cancel to stop.");
             return;
         }
 
         const enabled = threshold > 0;
-        await UserService.updateThreshold(userId, threshold);
+        // "0" switches these alerts off. It used to also be saved as the BDT
+        // threshold, silently removing the low-balance warning in the daily
+        // update as well, which the user never asked for.
+        if (enabled) {
+            await UserService.updateThreshold(userId, threshold);
+        }
         await UserService.updateHourlyNotification(userId, enabled);
         await refreshSchedules();
         userSessions.delete(userId);

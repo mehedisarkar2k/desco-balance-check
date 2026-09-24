@@ -41,6 +41,16 @@ const BANGLISH = new Set([
 ]);
 
 /**
+ * Words that appear the same in either language: month abbreviations and
+ * units. "11 sept?" asked in the middle of a Bangla conversation is not an
+ * English message, so a message made only of these keeps the language in use.
+ */
+const NEUTRAL = new Set([
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "kwh", "bdt", "tk", "unit", "units", "am", "pm",
+]);
+
+/**
  * "bn" for Bangla script or Banglish, "en" for English, or null when the
  * message carries no signal either way (a bare number or an emoji), so the
  * caller can keep the language already in use.
@@ -48,7 +58,7 @@ const BANGLISH = new Set([
 export function detectReplyLanguage(message: string): ReplyLanguage | null {
     if (/[ঀ-৿]/.test(message)) return "bn";
 
-    const words = message.toLowerCase().match(/[a-z]+/g) ?? [];
+    const words = (message.toLowerCase().match(/[a-z]+/g) ?? []).filter((word) => !NEUTRAL.has(word));
     if (words.length === 0) return null;
 
     const hits = words.filter((word) => BANGLISH.has(word)).length;

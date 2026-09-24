@@ -1,5 +1,6 @@
 import { Context } from "telegraf";
 import { sendMessage, ADMIN_CHAT_ID } from "../bot";
+import { escapeHtml } from "./html";
 import { getBalanceReport, formatBalanceMessage } from "./usage";
 import {
     getOverview,
@@ -96,15 +97,15 @@ async function reportFailure(
     // reads like the bot never tried, when the caller simply does not collect
     // URLs, and that sent the last investigation down the wrong path.
     const urlSection = attemptedUrls?.length
-        ? `\n\n<b>Attempted URLs:</b>\n${attemptedUrls.map((url, i) => `${i + 1}. <code>${url}</code>`).join("\n")}`
+        ? `\n\n<b>Attempted URLs:</b>\n${attemptedUrls.map((url, i) => `${i + 1}. <code>${escapeHtml(url)}</code>`).join("\n")}`
         : "";
 
     const errorMessage = `
 🚨 <b>${title}</b>
 
-<b>User:</b> ${ctx.from?.first_name || "Unknown"} (@${ctx.from?.username || "no username"})
+<b>User:</b> ${escapeHtml(ctx.from?.first_name || "Unknown")} (@${escapeHtml(ctx.from?.username || "no username")})
 <b>User ID:</b> ${ctx.from?.id}
-<b>Error:</b> ${errorMsg}${urlSection}
+<b>Error:</b> ${escapeHtml(errorMsg)}${urlSection}
 `;
     await sendMessage(errorMessage, ADMIN_CHAT_ID);
 }

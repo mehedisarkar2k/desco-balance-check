@@ -20,6 +20,9 @@ export class UserService {
             });
         } else if (userData) {
             // Update user info if provided
+            // Writing to the bot means they are reachable again, so reminders
+            // and announcements resume. blockedAt was never cleared before.
+            if (user.blockedAt) user.set("blockedAt", undefined);
             user.username = userData.username || user.username;
             user.firstName = userData.firstName || user.firstName;
             user.lastName = userData.lastName || user.lastName;
@@ -111,6 +114,27 @@ export class UserService {
     }
 
     /**
+     * Claims the low-balance alert for a reading, returning true only for the
+     * caller that should send it.
+     *
+     * The claim and the check are one atomic update. Checking in memory and
+     * writing after sending let two overlapping runs (a slow hour, or old and
+     * new instances during a deploy) both send the same alert.
+     */
+    static async claimLowAlert(telegramId: number, readingDate: string): Promise<boolean> {
+        const result = await User.updateOne(
+            { telegramId, lastLowAlertReadingDate: { $ne: readingDate } },
+            { lastLowAlertReadingDate: readingDate }
+        );
+        return result.modifiedCount === 1;
+    }
+
+    /** Telegram reported the user unreachable: they blocked the bot or left. */
+    static async markBlocked(telegramId: number): Promise<void> {
+        await User.updateOne({ telegramId }, { blockedAt: new Date() });
+    }
+
+    /**
      * Record which DESCO reading a low-balance alert was sent for, so repeat
      * checks against the same reading stay silent. Pass null once the balance
      * recovers, so the next dip alerts again.
@@ -145,7 +169,7 @@ export class UserService {
      * Get all subscribed users
      */
     static async getSubscribedUsers(): Promise<IUser[]> {
-        return await User.find({ isSubscribed: true });
+        return await User.find({ isSubscribed: true, blockedAt: { $exists: false } });
     }
 
     /**
@@ -155,6 +179,7 @@ export class UserService {
         return await User.find({
             isSubscribed: true,
             notificationTimes: time,
+            blockedAt: { $exists: false },
         });
     }
 
@@ -162,9 +187,12 @@ export class UserService {
      * Get users with hourly notifications enabled
      */
     static async getUsersWithHourlyNotifications(): Promise<IUser[]> {
+        // Not tied to isSubscribed. Low-balance alerts are their own setting:
+        // requiring daily reminders too meant a user who switched on alerts,
+        // and was told they were on, never received one.
         return await User.find({
-            isSubscribed: true,
             hourlyNotificationEnabled: true,
+            blockedAt: { $exists: false },
         });
     }
 
