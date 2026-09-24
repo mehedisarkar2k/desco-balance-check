@@ -101,11 +101,15 @@ function lastDayOf(month: string): string {
 
 const isDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value));
 
-/** Days the house is empty, both ends included. */
+/** Days nobody is home, both ends included, and what is used each of those days. */
 interface Away {
     from: string;
     until: string;
+    kwhPerDay: number;
 }
+
+/** No more than this is believed to run in an empty home. */
+const MAX_AWAY_KWH_PER_DAY = 10;
 
 /** Reads awayFrom/awayUntil from a tool call: absent, valid, or an error to hand back. */
 function parseAway(args: any, today: string): Away | null | { error: string } {
@@ -116,11 +120,25 @@ function parseAway(args: any, today: string): Away | null | { error: string } {
     if (!isDate(from) || !isDate(until)) {
         return { error: "awayFrom and awayUntil must both be dates in YYYY-MM-DD format." };
     }
-    if (until < from) return { error: "awayUntil must be on or after awayFrom." };
+    if (until < from) {
+        // Said to the model, not the user: a bare "10 tarikh" in a message
+        // that also named November was read as 10 Nov, and the user was told
+        // their trip was impossible.
+        return {
+            error:
+                "awayFrom is after awayUntil. A departure given only as a day of the month is the next such " +
+                `day after today (${today}); correct the dates and call again rather than asking the user.`,
+        };
+    }
     if (until <= today) return { error: "The time away must end after today." };
     if (from > shiftDate(today, 120)) return { error: "The time away must start within 120 days." };
 
-    return { from: from < today ? shiftDate(today, 1) : from, until };
+    const kwh = args?.awayKwhPerDay === undefined || args?.awayKwhPerDay === null ? 0 : Number(args.awayKwhPerDay);
+    if (!Number.isFinite(kwh) || kwh < 0 || kwh > MAX_AWAY_KWH_PER_DAY) {
+        return { error: `awayKwhPerDay must be between 0 and ${MAX_AWAY_KWH_PER_DAY}.` };
+    }
+
+    return { from: from < today ? shiftDate(today, 1) : from, until, kwhPerDay: kwh };
 }
 
 /** Fixed charges as the model is given them. */
@@ -165,8 +183,10 @@ async function projectionInputs(params: { accountNo?: string; meterNo?: string }
         balanceDate: data.readingTime,
         kwhPerDay: usage.kwhPerDay,
         days: (away) => {
-            const isAway = away ? (date: string) => date >= away.from && date <= away.until : undefined;
-            return spendDays(rows, data.readingTime, usage.kwhPerDay, units, isAway) ?? [];
+            const kwhOn = away
+                ? (date: string) => (date >= away.from && date <= away.until ? away.kwhPerDay : undefined)
+                : undefined;
+            return spendDays(rows, data.readingTime, usage.kwhPerDay, units, kwhOn) ?? [];
         },
         terms,
         pending,
@@ -174,21 +194,33 @@ async function projectionInputs(params: { accountNo?: string; meterNo?: string }
     };
 }
 
-/** The assumptions behind every recharge figure, stated so the model can pass them on. */
-function rechargeAssumptions(inputs: ProjectionInputs, away?: Away | null): string[] {
+/**
+ * The assumptions behind every recharge figure. The one that decides the
+ * answer is given apart from the rest: handed a list, the model recited all
+ * five in every reply, burying the amount under the method.
+ */
+function rechargeAssumptions(inputs: ProjectionInputs, away?: Away | null) {
     const { terms } = inputs;
-    return [
-        `Use continues at ${inputs.kwhPerDay.toFixed(2)} kWh a day, the average of the last 14 days. More use, e.g. more AC, needs more.`,
-        ...(away ? [`No use at all from ${away.from} to ${away.until}, while the house is empty.`] : []),
-        "Each day is priced with the slab rates found in this account's own readings; the rate resets on the 1st.",
-        `${(terms.energyShare * 100).toFixed(2)}% of each taka recharged becomes energy credit` +
-            (terms.derived ? " (measured from past recharges)." : " (5% VAT less the 0.5% rebate; no past recharge to measure it from)."),
-        terms.monthlyChargeBDT !== null
-            ? `Every calendar month has a fixed charge of ${terms.monthlyChargeBDT.toFixed(2)} BDT, even a month ` +
-              "with no use. It is never taken from the balance. The first recharge made in or after a month pays " +
-              "it, along with every earlier month that had no recharge. There is no late fee on it."
-            : "The fixed monthly charge could not be measured from past recharges, so it is not included.",
-    ];
+    const home = `${inputs.kwhPerDay.toFixed(2)} kWh a day at home, the average of the last 14 days`;
+    const awayPart = !away
+        ? ""
+        : away.kwhPerDay > 0
+            ? `; ${away.kwhPerDay} kWh a day from ${away.from} to ${away.until} while away, for what stays on`
+            : `; nothing from ${away.from} to ${away.until} while away, with everything off`;
+
+    return {
+        mainAssumption: `Use: ${home}${awayPart}. More use, e.g. more AC, needs more.`,
+        howItWasWorkedOut: [
+            "Each day is priced with the slab rates found in this account's own readings; the rate resets on the 1st.",
+            `${(terms.energyShare * 100).toFixed(2)}% of each taka recharged becomes energy credit` +
+                (terms.derived ? " (measured from past recharges)." : " (5% VAT less the 0.5% rebate; no past recharge to measure it from)."),
+            terms.monthlyChargeBDT !== null
+                ? `Every calendar month has a fixed charge of ${terms.monthlyChargeBDT.toFixed(2)} BDT, even a month ` +
+                  "with no use. It is never taken from the balance. The first recharge made in or after a month pays " +
+                  "it, along with every earlier month that had no recharge. There is no late fee on it."
+                : "The fixed monthly charge could not be measured from past recharges, so it is not included.",
+        ],
+    };
 }
 
 /**
@@ -306,7 +338,7 @@ const TOOLS: Record<string, Tool> = {
             description:
                 "Works out how much to recharge so the power lasts until a given date: the end of this or next " +
                 "month, or past a trip. Projects day-by-day use at the recent average, priced with the slab rates " +
-                "(which reset on the 1st), with no use on days away. Spends the current balance first, and adds " +
+                "(which reset on the 1st), with little or no use on days away. Spends the current balance first, and adds " +
                 "what a recharge loses to VAT and to fixed monthly charges, including those of months with no " +
                 "recharge. Gives the amount for each month the recharge could be made in. Use it for every " +
                 "question about how much to recharge or load.",
@@ -320,12 +352,20 @@ const TOOLS: Record<string, Tool> = {
                     awayFrom: {
                         type: Type.STRING,
                         description:
-                            "Optional. First day the house will be empty (trip, holiday), YYYY-MM-DD. Those days " +
-                            "use no power. Give with awayUntil.",
+                            "Optional. First day nobody is home (trip, holiday), YYYY-MM-DD. Those days use only " +
+                            "awayKwhPerDay. Give with awayUntil.",
                     },
                     awayUntil: {
                         type: Type.STRING,
-                        description: "Optional. Last day away, YYYY-MM-DD; the day before the user is back.",
+                        description:
+                            "Optional. Last day away, YYYY-MM-DD: the day before the user is back. Back on 9 Nov " +
+                            "means 2026-11-08.",
+                    },
+                    awayKwhPerDay: {
+                        type: Type.NUMBER,
+                        description:
+                            "Optional. Power still used each day while away, by whatever stays on. A fridge alone " +
+                            "is about 1.2 kWh a day. Leave out when everything is switched off.",
                     },
                 },
                 required: ["until"],
@@ -396,7 +436,7 @@ const TOOLS: Record<string, Tool> = {
             return withFreshness({
                 today,
                 coverUntil: until,
-                ...(away ? { awayFrom: away.from, awayUntil: away.until } : {}),
+                ...(away ? { awayFrom: away.from, awayUntil: away.until, awayKwhPerDay: away.kwhPerDay } : {}),
                 balanceBDT: inputs.balance,
                 balanceDate: inputs.balanceDate,
                 avgDailyKwh: round2(inputs.kwhPerDay),
@@ -404,18 +444,28 @@ const TOOLS: Record<string, Tool> = {
                     month: m.month,
                     daysWithUse: m.days,
                     kwh: round2(m.kwh),
-                    costBDT: round2(m.costBDT),
+                    // Named for what it is. Called costBDT, it was presented as
+                    // including the month's fixed charge, which it never does.
+                    energyCostBDT: round2(m.costBDT),
                     paidByBalanceBDT: round2(m.paidByBalanceBDT),
                     leftForRechargeBDT: round2(m.leftForRechargeBDT),
                 })),
                 forecastTotalBDT: round2(forecast.totalBDT),
                 balanceLastsUntil: forecast.balanceRunsOutOn ?? `past ${until}; no recharge needed`,
+                ...(away && runsOut && runsOut >= away.from && runsOut <= away.until
+                    ? {
+                        runsOutWhileAway:
+                            `The balance runs out on ${runsOut}, while the user is away, so anything left on ` +
+                            "(a fridge) loses power then. They must recharge before that day: before leaving, or " +
+                            "online while away. Say this plainly.",
+                    }
+                    : {}),
                 energyCreditNeededBDT: round2(creditNeeded),
                 rechargeOptions: options,
                 ...(options.length === 0 && inputs.pending
                     ? { fixedChargesDueNextRecharge: describeCharges(inputs.pending.months, terms) }
                     : {}),
-                assumptions: rechargeAssumptions(inputs, away),
+                ...rechargeAssumptions(inputs, away),
             }, ...inputs.freshnessSources);
         },
     },
@@ -436,12 +486,20 @@ const TOOLS: Record<string, Tool> = {
                     awayFrom: {
                         type: Type.STRING,
                         description:
-                            "Optional. First day the house will be empty (trip, holiday), YYYY-MM-DD. Those days " +
-                            "use no power. Give with awayUntil.",
+                            "Optional. First day nobody is home (trip, holiday), YYYY-MM-DD. Those days use only " +
+                            "awayKwhPerDay. Give with awayUntil.",
                     },
                     awayUntil: {
                         type: Type.STRING,
-                        description: "Optional. Last day away, YYYY-MM-DD; the day before the user is back.",
+                        description:
+                            "Optional. Last day away, YYYY-MM-DD: the day before the user is back. Back on 9 Nov " +
+                            "means 2026-11-08.",
+                    },
+                    awayKwhPerDay: {
+                        type: Type.NUMBER,
+                        description:
+                            "Optional. Power still used each day while away, by whatever stays on. A fridge alone " +
+                            "is about 1.2 kWh a day. Leave out when everything is switched off.",
                     },
                 },
                 required: ["amountBDT"],
@@ -486,13 +544,13 @@ const TOOLS: Record<string, Tool> = {
                 fixedChargesPaid: { ...describeCharges(paysFor, terms), takenFromThisAmountBDT: round2(charges) },
                 vatLessRebateBDT: round2(Math.max(0, amount - charges - credit)),
                 ...(warning ? { warning } : {}),
-                ...(away ? { awayFrom: away.from, awayUntil: away.until } : {}),
+                ...(away ? { awayFrom: away.from, awayUntil: away.until, awayKwhPerDay: away.kwhPerDay } : {}),
                 balanceNowBDT: inputs.balance,
                 balanceAfterBDT: round2(inputs.balance + credit),
                 lastsUntilWithoutRecharge: before,
                 lastsUntilWithRecharge: after ?? "more than 400 days",
                 extraDays,
-                assumptions: rechargeAssumptions(inputs, away),
+                ...rechargeAssumptions(inputs, away),
             }, ...inputs.freshnessSources);
         },
     },

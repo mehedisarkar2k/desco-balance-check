@@ -58,16 +58,17 @@ export interface DaySpend {
  * date a balance runs out and the amount needed to reach a date can never
  * disagree. Returns null when no tariff curve can be built.
  *
- * Days for which `isAway` returns true use nothing: the house is empty. They
- * also leave the month's running total where it is, so the days after a
- * return are priced at the lower slab they really fall in.
+ * `kwhOn` overrides the use on particular days, for time away: nothing when
+ * the house is shut, or a little when a fridge stays on. Those days add only
+ * that much to the month's running total, so the days after a return are
+ * priced at the lower slab they really fall in.
  */
 export function spendDays(
     rows: DailyConsumption[],
     readingTime: string,
     kwhPerDay: number,
     monthToDateUnits: number,
-    isAway?: (date: string) => boolean
+    kwhOn?: (date: string) => number | undefined
 ): Generator<DaySpend> | null {
     if (!(kwhPerDay > 0)) return null;
 
@@ -102,17 +103,18 @@ export function spendDays(
             }
 
             const date = cursor.toISOString().slice(0, 10);
-            if (isAway?.(date)) {
+            const kwh = kwhOn?.(date) ?? kwhPerDay;
+            if (!(kwh > 0)) {
                 yield { date, month, kwh: 0, cost: 0 };
                 continue;
             }
 
-            const cost = price(units, units + kwhPerDay);
+            const cost = price(units, units + kwh);
             // A curve that prices a day at nothing cannot project anything.
             if (!(cost > 0)) return;
 
-            units += kwhPerDay;
-            yield { date, month, kwh: kwhPerDay, cost };
+            units += kwh;
+            yield { date, month, kwh, cost };
         }
     })();
 }
