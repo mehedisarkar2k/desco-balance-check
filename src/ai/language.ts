@@ -23,6 +23,7 @@ const BANGLISH = new Set([
     "ache", "achhe", "nai", "nei", "hobe", "hoy", "hoye", "hoyeche", "hocche", "hochhe", "holo", "hoilo",
     "korbo", "korbe", "koro", "korun", "kore", "korei", "korle", "korte", "kora", "koreche", "korechi", "korchi", "korche",
     "dao", "daw", "dibo", "dibe", "dite", "dilam", "dicche", "dichhe", "diye",
+    "pathaw", "pathao", "pathan", "pathabo", "pathiye", "pathale",
     "dekho", "dekhao", "dekhan", "dekhi", "dekhte", "bolo", "bolen", "bolte",
     "jabe", "jabo", "jai", "jay", "jete", "jacchi", "cholbe", "chole", "lagbe", "lage", "lagche",
     "pari", "paro", "pare", "parbo", "parchi", "chai", "chaile", "janaw", "janao", "jani",
@@ -56,4 +57,18 @@ export function detectReplyLanguage(message: string): ReplyLanguage | null {
     // still English. Two, or a large share of a short message ("tariff koto?",
     // "jul mase uses history?"), is Banglish.
     return hits >= 2 || hits / words.length >= 0.25 ? "bn" : "en";
+}
+
+/**
+ * Whether a reply is in the expected language, judged by the share of Bangla
+ * letters among all letters. Bangla replies still carry "kWh" and "BDT", and
+ * English ones may quote a Bangla word, so the test is a share, not presence.
+ * Display tokens such as [[BLOCK_2]] are ignored.
+ */
+export function isInLanguage(text: string, language: ReplyLanguage): boolean {
+    const letters = text.replace(/\[\[[A-Z]+_\d+\]\]/g, "").match(/[\u0980-\u09FF]|[A-Za-z]/g) ?? [];
+    if (letters.length === 0) return true;
+
+    const bangla = letters.filter((ch) => /[\u0980-\u09FF]/.test(ch)).length / letters.length;
+    return language === "bn" ? bangla >= 0.3 : bangla <= 0.3;
 }

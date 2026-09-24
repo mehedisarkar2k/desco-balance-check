@@ -1,9 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
 import type { Content } from "@google/genai";
 import dotenv from "dotenv";
-import { Session, appendHistory, expandTables } from "./session";
+import { Session, appendHistory, expandDisplays } from "./session";
 import { Role, ToolContext, declarationsForRole, executeTool } from "./tools";
-import { ReplyLanguage } from "./language";
+import { ReplyLanguage, isInLanguage } from "./language";
 import { nowInBillingZone, shiftDate, todayInBillingZone } from "../utils/dates";
 
 dotenv.config();
@@ -107,8 +107,11 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "  literal symbols.",
         "- For a short list, start each line with '• '.",
         "- To show more than 3 days of figures, put the displayTable token from get_daily_usage on its own",
-        "  line, exactly as given (for example [[TABLE_2]]). The bot replaces it with an aligned table of",
+        "  line, exactly as given (for example [[BLOCK_2]]). The bot replaces it with an aligned table of",
         "  date, kWh, BDT and tariff. Do not also write those rows yourself.",
+        "- When the user asks to be sent their reminder or an update now, call show_balance_update and put",
+        "  its displayMessage token on its own line. You can send it; do not say you cannot. Add at most one",
+        "  short line of your own around it.",
         "- For 1 to 3 days, give the figures in a sentence.",
         "- Be brief and concrete, a few short lines.",
         "",
@@ -137,6 +140,54 @@ const FALLBACK = {
 };
 
 /**
+ * The language instruction, attached to the user's own message for the turn.
+ *
+ * The same rule in the system instructions was not enough: after a Bangla
+ * exchange, "thank you. keep me daily updated" was still answered in Bangla.
+ * An instruction inside the latest user turn is the one the model weighs most.
+ */
+function languageDirective(language: ReplyLanguage): string {
+    return language === "bn"
+        ? "[Reply in Bangla script (বাংলা).]"
+        : "[Reply in English.]";
+}
+
+/**
+ * Asks once for the same reply in the right language. A safety net for when
+ * the model follows the conversation's earlier language instead of the
+ * instruction; it costs an extra call only when that has happened.
+ */
+async function rewriteInLanguage(
+    ai: GoogleGenAI,
+    contents: Content[],
+    text: string,
+    language: ReplyLanguage,
+    systemInstructionText: string
+): Promise<string | null> {
+    const target = language === "bn" ? "Bangla script (বাংলা)" : "English";
+    const response = await ai.models.generateContent({
+        model: MODEL,
+        contents: [
+            ...contents,
+            { role: "model", parts: [{ text }] },
+            {
+                role: "user",
+                parts: [{
+                    text:
+                        `Rewrite your last reply in ${target}. Keep every number, date and [[BLOCK_n]] token exactly, ` +
+                        "and the same meaning. Output only the rewritten reply.",
+                }],
+            },
+        ],
+        // No tools: this is a rewrite, not a new lookup.
+        config: { systemInstruction: systemInstructionText, temperature: 0.2 },
+    });
+
+    const rewritten = response.text?.trim();
+    return rewritten && isInLanguage(rewritten, language) ? rewritten : null;
+}
+
+/**
  * Answers one message, letting the model call tools as needed.
  *
  * Conversation history lives on the session, tool calls and results included,
@@ -153,11 +204,12 @@ export async function askGemini(
 
     const contents: Content[] = [
         ...session.history,
-        { role: "user", parts: [{ text: message }] },
+        { role: "user", parts: [{ text: message }, { text: languageDirective(language) }] },
     ];
 
+    const instructions = systemInstruction(ctx.role, language);
     const config = {
-        systemInstruction: systemInstruction(ctx.role, language),
+        systemInstruction: instructions,
         tools: [{ functionDeclarations: declarationsForRole(ctx.role) }],
         temperature: 0.3,
     };
@@ -167,7 +219,13 @@ export async function askGemini(
 
         const calls = response.functionCalls ?? [];
         if (calls.length === 0) {
-            const text = response.text?.trim() || FALLBACK.unclear[language];
+            let text = response.text?.trim() || FALLBACK.unclear[language];
+
+            if (!isInLanguage(text, language)) {
+                const rewritten = await rewriteInLanguage(ai, contents, text, language, instructions);
+                console.warn(`Reply was not in ${language}; rewrite ${rewritten ? "succeeded" : "failed"}`);
+                if (rewritten) text = rewritten;
+            }
 
             // The whole turn is kept, tool calls and results included. Keeping
             // only the final text meant a follow-up such as "and the rate on
@@ -178,8 +236,8 @@ export async function askGemini(
                 { role: "model", parts: [{ text }] },
             ]);
 
-            // History keeps the token, which is short; the user gets the table.
-            return { text: expandTables(session, text), toolsUsed };
+            // History keeps the token, which is short; the user gets the block.
+            return { text: expandDisplays(session, text), toolsUsed };
         }
 
         // Record the model's request, then answer every call before looping.

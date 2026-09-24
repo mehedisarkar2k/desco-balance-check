@@ -5,9 +5,9 @@ import { User } from "../models/User";
 import { fetchCustomerInfo, fetchMonthlyConsumption, fetchDailyConsumption } from "../desco";
 import { buildMonthCurves, describeTariff } from "../domain/tariff";
 import { consumptionRange, TARIFF_WINDOW_DAYS, todayInBillingZone, dailyDeltas, DailyDelta } from "../utils/usage";
-import { getBalanceReport } from "../utils/usage";
+import { formatBalanceMessage, getBalanceReport } from "../utils/usage";
 import { dailyTableHtml, getDailyUsage, getRecharges } from "../utils/overview";
-import { Session, activeSessionCount, registerTable } from "./session";
+import { Session, activeSessionCount, registerDisplay } from "./session";
 import { staleAsOf } from "../descoStore";
 import { nowInBillingZone, shiftDate } from "../utils/dates";
 
@@ -139,6 +139,36 @@ const TOOLS: Record<string, Tool> = {
         },
     },
 
+    show_balance_update: {
+        minRole: "user",
+        declaration: {
+            name: "show_balance_update",
+            description:
+                "Prepares the same balance update the daily reminder sends: balance, yesterday's usage, days " +
+                "left and this month's cost. Use when the user asks to be sent their reminder or an update now " +
+                "('reminder pathaw', 'update dao', 'send me my update'). Returns a displayMessage token: put it " +
+                "on its own line in the reply and the bot replaces it with the update.",
+        },
+        handler: async (_args, ctx) => {
+            const params = requireAccount(ctx);
+            if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
+
+            const result = await getBalanceReport(params);
+            if (!result.success || !result.report) {
+                return { error: result.error ?? "Could not reach DESCO" };
+            }
+
+            // The exact message the scheduled reminder sends, so asking for it
+            // in chat gets the same thing rather than the model's paraphrase.
+            const { data, usage } = result.report;
+            return withFreshness({
+                displayMessage: registerDisplay(ctx.session, formatBalanceMessage(data, usage, "🔔 Balance Update")),
+                balanceBDT: data.balance,
+                balanceDate: data.readingTime,
+            }, data);
+        },
+    },
+
     get_daily_usage: {
         minRole: "user",
         declaration: {
@@ -202,7 +232,7 @@ const TOOLS: Record<string, Tool> = {
                 daily: period?.entries.map(describeDay) ?? [],
                 displayTable:
                     period && period.entries.length > 0
-                        ? registerTable(ctx.session, dailyTableHtml(period.entries))
+                        ? registerDisplay(ctx.session, dailyTableHtml(period.entries))
                         : null,
             }, report.rows);
         },
