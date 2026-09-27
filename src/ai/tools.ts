@@ -212,6 +212,9 @@ interface ProjectionInputs {
     balance: number;
     balanceDate: string;
     kwhPerDay: number;
+    /** This month's use so far: kWh from the daily readings, BDT as the meter has deducted it. */
+    monthToDateKwh: number;
+    monthToDateBDT: number;
     /**
      * A fresh day-by-day spend sequence each call, since a generator can only
      * be read once. `scale` multiplies use at home, for the safe amount.
@@ -246,6 +249,8 @@ async function projectionInputs(params: { accountNo?: string; meterNo?: string }
         balance: data.balance,
         balanceDate: data.readingTime,
         kwhPerDay: usage.kwhPerDay,
+        monthToDateKwh: units,
+        monthToDateBDT: data.currentMonthTaka,
         days: (away, scale = 1) => {
             const kwhOn = away
                 ? (date: string) => (date >= away.from && date <= away.until ? away.kwhPerDay : undefined)
@@ -428,7 +433,8 @@ const TOOLS: Record<string, Tool> = {
                 "what a recharge loses to VAT and to fixed monthly charges, including those of months with no " +
                 "recharge. Gives the amount for each month the recharge could be made in, and a safe amount that " +
                 "allows for more use. Returns a displayCard token with the whole answer written out. Use it for " +
-                "every question about how much to recharge or load.",
+                "every question about how much to recharge or load. Not for what a month costs in total: that " +
+                "is estimate_month_bill.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
@@ -766,6 +772,93 @@ const TOOLS: Record<string, Tool> = {
                     : {}),
                 extraDays,
                 ...rechargeAssumptions(inputs, away),
+            }, ...inputs.freshnessSources);
+        },
+    },
+
+    estimate_month_bill: {
+        minRole: "user",
+        declaration: {
+            name: "estimate_month_bill",
+            description:
+                "Estimates what a whole month's electricity costs in total: this month (what has been used so " +
+                "far plus the rest of the month at the recent average) or a coming month. Priced day by day " +
+                "with the slab rates, plus VAT and the month's fixed charge. Use it for every question about " +
+                "a month's total bill or cost, or how much a month will take, whatever the balance.",
+            parameters: {
+                type: Type.OBJECT,
+                properties: {
+                    month: {
+                        type: Type.STRING,
+                        description: "YYYY-MM. This month or a later one; leave out for this month.",
+                    },
+                },
+            },
+        },
+        handler: async (args, ctx) => {
+            const params = requireAccount(ctx);
+            if (!params) return { error: "No DESCO account saved. Ask the user to run /start." };
+
+            const today = todayInBillingZone();
+            const thisMonth = today.slice(0, 7);
+            const month = String(args?.month ?? thisMonth).trim();
+            if (!/^\d{4}-\d{2}$/.test(month)) return { error: "month must be in YYYY-MM format." };
+            if (month < thisMonth) {
+                return { error: "That month is over; use get_monthly_consumption for what it actually cost." };
+            }
+            const until = lastDayOf(month);
+            if (until > shiftDate(today, 120)) {
+                return { error: "Estimates reach at most 120 days ahead; usage that far out is too uncertain to price." };
+            }
+
+            const inputs = await projectionInputs(params);
+            if ("error" in inputs) return inputs;
+
+            // On the last day of a month nothing is left to project, and the
+            // forecast has no entry for it: the rest of the month is then zero.
+            const forecast = month === thisMonth && until <= today
+                ? { months: [] }
+                : forecastThrough(inputs.days(), until, inputs.balance);
+            if (!forecast) return { error: "Could not project usage that far with the tariff found." };
+
+            const rest = forecast.months.find((m) => m.month === month);
+            const isThisMonth = month === thisMonth;
+            const soFarBDT = isThisMonth ? Math.round(inputs.monthToDateBDT) : 0;
+            const restBDT = Math.round(rest?.costBDT ?? 0);
+            const electricityBDT = soFarBDT + restBDT;
+            // The meter deducts power at the tariff rate; what is paid for it
+            // includes VAT, less the rebate, at the account's measured share.
+            const vatBDT = Math.round(electricityBDT / inputs.terms.energyShare - electricityBDT);
+            const fixedChargeBDT = inputs.terms.monthlyChargeBDT === null ? null : chargePerMonth(inputs.terms);
+
+            // Every figure is rounded before it is summed, so the parts the
+            // reply gives always add up to the total it gives.
+            return withFreshness({
+                month,
+                estimatedTotalBDT: electricityBDT + vatBDT + (fixedChargeBDT ?? 0),
+                electricity: {
+                    ...(isThisMonth
+                        ? {
+                            usedSoFarBDT: soFarBDT,
+                            usedSoFarKwh: Math.round(inputs.monthToDateKwh),
+                            usedSoFarNote:
+                                "Actual. The BDT is what the meter has deducted this month up to now, as DESCO's " +
+                                "app shows it; the kWh runs to the latest daily reading.",
+                        }
+                        : {}),
+                    restOfMonthBDT: restBDT,
+                    restOfMonthKwh: Math.round(rest?.kwh ?? 0),
+                    totalBDT: electricityBDT,
+                },
+                vatBDT,
+                fixedChargeBDT,
+                ...(fixedChargeBDT === null
+                    ? { fixedChargeNote: "The fixed monthly charge could not be measured, so it is not in the total." }
+                    : {}),
+                note:
+                    "This is what the month's electricity costs, whenever it is paid. It is not how much to " +
+                    "recharge: part of it comes out of the current balance.",
+                mainAssumption: rechargeAssumptions(inputs).mainAssumption,
             }, ...inputs.freshnessSources);
         },
     },
