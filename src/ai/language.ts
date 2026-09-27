@@ -38,7 +38,7 @@ const BANGLISH = new Set([
     "aj", "ajke", "ajker", "kal", "kalke", "gotokal", "gotokaler", "porshu", "mase", "maser", "masher",
     "din", "diner", "dine", "ekhon", "ekhn", "akhon", "porjonto", "theke", "tarikh", "tarikhe",
     // money and electricity
-    "taka", "takar", "kharoch", "khoroch", "biddut", "bidyut",
+    "takar", "kharoch", "khoroch", "biddut", "bidyut",
     // other
     "akare", "hisebe", "hishabe", "jonno", "sathe", "moddhe",
 ]);
@@ -50,7 +50,7 @@ const BANGLISH = new Set([
  */
 const NEUTRAL = new Set([
     "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
-    "kwh", "bdt", "tk", "unit", "units", "am", "pm",
+    "kwh", "bdt", "tk", "taka", "unit", "units", "am", "pm",
 ]);
 
 /**
@@ -84,4 +84,16 @@ export function isInLanguage(text: string, language: ReplyLanguage): boolean {
 
     const bangla = letters.filter((ch) => /[\u0980-\u09FF]/.test(ch)).length / letters.length;
     return language === "bn" ? bangla >= 0.3 : bangla <= 0.3;
+}
+
+/**
+ * The language for messages the bot starts itself (setup, cards, alerts): the
+ * one the user last chatted in, else their Telegram app language.
+ */
+export function userLanguage(
+    user: { language?: ReplyLanguage } | null | undefined,
+    ctx: { from?: { language_code?: string } }
+): ReplyLanguage {
+    if (user?.language) return user.language;
+    return ctx.from?.language_code?.startsWith("bn") ? "bn" : "en";
 }

@@ -10,6 +10,7 @@ import {
 import { projectRunway, monthToDateUnits } from "../domain/runway";
 import { PendingCharges, RechargeTerms, deriveRechargeTerms, pendingCharges } from "../domain/recharge";
 import { staleAsOf } from "../descoStore";
+import type { ReplyLanguage } from "../ai/language";
 import { shiftDate, todayInBillingZone } from "./dates";
 
 /**
@@ -298,82 +299,6 @@ export function formatDayMonth(date: Date): string {
 }
 
 /**
- * The balance block shared by on-demand checks and scheduled notifications.
- * The usage lines are dropped when the daily series is unavailable.
- */
-export function formatBalanceMessage(
-    data: DescoResponse,
-    usage: UsageSummary | null,
-    heading?: string,
-    pending?: PendingCharges | null
-): string {
-    const lines: string[] = [];
-
-    if (heading) {
-        lines.push(`<b>${heading}</b>`, "");
-    }
-
-    lines.push(`💰 <b>Balance:</b> <code>${data.balance.toFixed(2)} BDT</code>`);
-
-    if (usage?.latestDay) {
-        lines.push(...latestDayLines(usage.latestDay, Boolean(usage.yesterdayUnpublished)));
-    }
-
-    if (usage) {
-        const days = Math.floor(usage.daysRemaining);
-        lines.push(
-            `⏳ <b>Runs out:</b> <code>~${days} ${days === 1 ? "day" : "days"}</code> (around ${formatDayMonth(usage.runoutDate)})`,
-            `📉 <b>Avg use:</b> <code>${usage.takaPerDay.toFixed(2)} BDT/day</code> · <code>${usage.kwhPerDay.toFixed(2)} kWh</code>`
-        );
-    }
-
-    lines.push(
-        `⚡ <b>This month:</b> <code>${data.currentMonthTaka.toFixed(2)} BDT</code>`,
-        // Named for what it is. "Reading: 2026-09-24" next to usage that ran
-        // only to the 23rd left people asking which day it referred to.
-        `📅 <b>Balance date:</b> <code>${formatDayMonth(new Date(Date.parse(data.readingTime)))}</code>`
-    );
-
-    if (pending) {
-        lines.push(...pendingChargeLines(pending));
-    }
-
-    if (usage) {
-        lines.push("", forecastNote(usage));
-    }
-
-    const stale = staleNote(data);
-    if (stale) {
-        lines.push("", stale);
-    }
-
-    return lines.join("\n");
-}
-
-/**
- * The most recent day's usage, labelled with its real date.
- *
- * It is called "Yesterday" only when it is yesterday. Before DESCO publishes
- * the morning's reading the newest day is the one before, and labelling that
- * as yesterday is exactly the mistake users caught the assistant making.
- */
-function latestDayLines(day: DailyDelta, yesterdayUnpublished: boolean): string[] {
-    const yesterday = shiftDate(todayInBillingZone(), -1);
-    const label = day.date === yesterday ? "Yesterday" : "Latest day";
-    const date = formatDayMonth(new Date(Date.parse(day.date)));
-    const rate = day.kwh > 0 ? ` · <code>${(day.taka / day.kwh).toFixed(2)}/kWh</code>` : "";
-    const span = day.spanDays > 1 ? ` <i>(covers ${day.spanDays} days)</i>` : "";
-
-    const lines = [
-        `🔌 <b>${label} (${date}):</b> <code>${day.kwh.toFixed(2)} kWh</code> · <code>${day.taka.toFixed(2)} BDT</code>${rate}${span}`,
-    ];
-    if (yesterdayUnpublished) {
-        lines.push(`<i>DESCO has not published ${formatDayMonth(new Date(Date.parse(yesterday)))} yet.</i>`);
-    }
-    return lines;
-}
-
-/**
  * A line telling the user they are looking at a saved copy, or null when the
  * data is live. Showing saved figures without saying so would pass off an old
  * balance as the current one.
@@ -396,19 +321,14 @@ export function staleNote(...sources: unknown[]): string | null {
 }
 
 /**
- * States that the runway is a projection, not a promise.
- *
- * It assumes consumption carries on at the recent average, so a hotter week or
- * guests staying will shorten it. Presented as a bare number it reads like a
- * fact about the account, which invites people to leave recharging until the
- * day before it says they will run out.
+ * States that the runway is a projection, not a promise: an estimate from
+ * recent use and the slab rates, so a hotter week or guests staying will
+ * shorten it.
  */
-export function forecastNote(usage: UsageSummary): string {
-    return usage.tariffAware
-        ? `<i>ℹ️ Days left is a forecast: your recent usage priced against DESCO's ` +
-          `slab rates, including the reset on the 1st. Use more and it will be shorter.</i>`
-        : `<i>ℹ️ Days left is a rough forecast at your recent average rate. There aren't ` +
-          `enough readings yet to apply DESCO's slab rates, so expect it to be off.</i>`;
+export function forecastNote(language: ReplyLanguage): string {
+    return language === "bn"
+        ? "<i>ℹ️ কত দিন চলবে তা সাম্প্রতিক ব্যবহার ও স্ল্যাব রেট থেকে অনুমান।</i>"
+        : "<i>ℹ️ Days left is an estimate from your recent use and the slab rates.</i>";
 }
 
 /** Whether the account should be treated as low: by runway if known, else by balance. */
@@ -420,69 +340,4 @@ export function isLowBalance(
 ): boolean {
     if (balance <= thresholdTaka) return true;
     return usage !== null && usage.daysRemaining <= thresholdDays;
-}
-
-/** "Sep" for "2026-09". */
-function monthLabel(month: string): string {
-    return new Date(`${month}-01T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" });
-}
-
-/**
- * The fixed charges waiting for the next recharge.
- *
- * DESCO takes each month's demand charge from the first recharge made in or
- * after that month, never from the balance on the meter. A household that
- * skipped a month (away, or the balance lasted) found its next recharge buying
- * far less power than usual with nothing explaining why.
- */
-function pendingChargeLines(pending: PendingCharges): string[] {
-    const months = pending.months.map(monthLabel).join(", ");
-    // Whole taka per month times the months, the same figures chat gives, so
-    // the two never differ by a paisa of rounding.
-    const perMonth = Math.round(pending.amountBDT / pending.months.length);
-    const amount = `<code>${perMonth * pending.months.length} BDT</code>`;
-
-    if (pending.months.length === 1) {
-        return [`🧾 <b>Fixed charge due:</b> ${amount} (${months}), taken from your next recharge first`];
-    }
-
-    return [
-        `🧾 <b>Fixed charges due:</b> ${amount} (${months}), taken from your next recharge first`,
-        `<i>Each month without a recharge adds one more. There is no late fee, but a recharge ` +
-        `has to be larger than this to add any power.</i>`,
-    ];
-}
-
-export function formatLowBalanceAlert(
-    balance: number,
-    usage: UsageSummary | null,
-    thresholdTaka: number,
-    pending?: PendingCharges | null
-): string {
-    const runway = usage
-        ? ` — about <b>${Math.floor(usage.daysRemaining)} days</b> left at ${usage.takaPerDay.toFixed(2)} BDT/day`
-        : ` (threshold: ${thresholdTaka} BDT)`;
-
-    const lines = [
-        `<b>⚠️ Low Balance Alert!</b>`,
-        "",
-        `Your balance is <code>${balance.toFixed(2)} BDT</code>${runway}.`,
-        "",
-        "Recharge soon to avoid disconnection.",
-    ];
-
-    if (pending) {
-        lines.push("", ...pendingChargeLines(pending));
-    }
-
-    // What to do if it does run out, since that is when people need it and
-    // are least likely to have it to hand.
-    lines.push(
-        "",
-        "<i>🆘 If it runs out: press the meter's emergency button for emergency balance. DESCO does not " +
-        "cut power between 4 pm and 10 am, on Fridays and Saturdays, or on government holidays. The " +
-        "emergency amount comes back out of your next recharge, with no interest.</i>"
-    );
-
-    return lines.join("\n");
 }

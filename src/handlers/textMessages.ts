@@ -1,12 +1,16 @@
 import { Context } from "telegraf";
 import { UserService } from "../services/UserService";
 import { userSessions } from "./commands";
-import { performBalanceCheck, performOverview } from "../utils/balanceChecker";
+import { performOverview } from "../utils/balanceChecker";
 import { refreshSchedules } from "../scheduler";
 import { MIN_OVERVIEW_DAYS, MAX_OVERVIEW_DAYS } from "../utils/overview";
 import { handleAiMessage } from "../ai";
+import { handleNumberStep, isNumberStep } from "./onboarding";
 import { parseTimes } from "../utils/times";
 import { userIdOf } from "../services/SupportService";
+import { ADMIN_CHAT_ID, bot } from "../bot";
+import { getPendingText, sendAnnouncementPreview, setPendingText } from "../utils/announcer";
+import { rewriteAnnouncement } from "../ai/announcementEditor";
 
 export async function handleTextMessage(ctx: Context) {
     const userId = userIdOf(ctx);
@@ -24,62 +28,37 @@ export async function handleTextMessage(ctx: Context) {
         return;
     }
 
-    // Setup flow (for /start)
-    if (session.step === "setup_account") {
-        if (text.toLowerCase() === "skip") {
-            session.step = "setup_meter";
-            await ctx.reply("Please enter your Meter Number:");
-        } else {
-            session.accountNo = text.trim();
-            session.step = "setup_meter";
-            await ctx.reply("Great! Now please enter your Meter Number (or type 'skip'):");
-        }
-        userSessions.set(userId, session);
-    } else if (session.step === "setup_meter") {
-        const meterNo = text.toLowerCase() === "skip" ? undefined : text.trim();
-        const accountNo = session.accountNo;
+    // Setup, update and one-off balance: one number is asked for and checked
+    // with DESCO by the onboarding flow.
+    if (isNumberStep(session.step)) {
+        await handleNumberStep(ctx, session.step, text);
+        return;
+    }
 
-        if (!accountNo && !meterNo) {
-            await ctx.reply("❌ You must provide at least Account Number or Meter Number. Let's try again.\n\nPlease enter your Account Number (or type 'skip'):");
-            session.step = "setup_account";
-            userSessions.set(userId, session);
+    if (session.step === "announce_edit") {
+        if (ctx.from?.id !== ADMIN_CHAT_ID) {
+            userSessions.delete(userId);
             return;
         }
-
-        // Save to database
-        await UserService.updateAccountDetails(userId, accountNo, meterNo);
+        const current = getPendingText();
         userSessions.delete(userId);
-
-        await ctx.reply(
-            "✅ Account details saved!\n\n" +
-            `Account No: ${accountNo || "Not set"}\n` +
-            `Meter No: ${meterNo || "Not set"}\n\n` +
-            "You can now use /balance to check your balance.\n" +
-            "Use /subscribe to enable automatic notifications!"
-        );
-    }
-    // Balance check flow
-    else if (session.step === "waiting_for_account") {
-        if (text.toLowerCase() === "skip") {
-            session.step = "waiting_for_meter";
-            await ctx.reply("Please enter your Meter Number:");
-        } else {
-            session.accountNo = text.trim();
-            session.step = "waiting_for_meter";
-            await ctx.reply("Please enter your Meter Number:");
+        if (!current) {
+            await ctx.reply("⚠️ No announcement is pending.");
+            return;
         }
-        userSessions.set(userId, session);
-    } else if (session.step === "waiting_for_meter") {
-        session.meterNo = text.trim();
-        await ctx.reply("Fetching balance... ⏳");
-        await performBalanceCheck(ctx, {
-            accountNo: session.accountNo,
-            meterNo: session.meterNo
-        });
-        userSessions.delete(userId);
+        await ctx.reply("✏️ Rewriting… ⏳");
+        try {
+            const rewritten = await rewriteAnnouncement(current, text);
+            setPendingText(rewritten);
+            await sendAnnouncementPreview(bot);
+        } catch (error: any) {
+            await ctx.reply(`❌ Rewrite failed: ${String(error?.message || error).split("\n")[0]}`);
+        }
+        return;
     }
+
     // Usage overview flow
-    else if (session.step === "usage_custom_days") {
+    if (session.step === "usage_custom_days") {
         const days = parseInt(text);
 
         if (isNaN(days) || days < MIN_OVERVIEW_DAYS || days > MAX_OVERVIEW_DAYS) {
@@ -101,20 +80,7 @@ export async function handleTextMessage(ctx: Context) {
         await performOverview(ctx, { accountNo: user.accountNo, meterNo: user.meterNo }, days);
     }
     // Update flows
-    else if (session.step === "update_account_no") {
-        const accountNo = text.toLowerCase() === "skip" ? undefined : text.trim();
-        session.accountNo = accountNo;
-        session.step = "update_meter_no";
-        await ctx.reply("Please enter your new Meter Number (or type 'skip' to keep current):");
-        userSessions.set(userId, session);
-    } else if (session.step === "update_meter_no") {
-        const meterNo = text.toLowerCase() === "skip" ? undefined : text.trim();
-
-        await UserService.updateAccountDetails(userId, session.accountNo, meterNo);
-        userSessions.delete(userId);
-
-        await ctx.reply("✅ Account details updated successfully!\n\nUse /me to view your updated information.");
-    } else if (session.step === "update_notification_times") {
+    else if (session.step === "update_notification_times") {
         // Validated in full rather than filtered: the old filter silently
         // dropped some entries and let "08:60" through to the scheduler.
         const times = parseTimes(text.split(","));

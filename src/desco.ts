@@ -167,6 +167,50 @@ function toNumber(value: unknown): number {
     return value === null || value === undefined || value === "" ? NaN : Number(value);
 }
 
+export type DescoNumberCheck = "found" | "not_found" | "unreachable";
+
+/**
+ * Whether DESCO knows a number, asked directly rather than through the saved
+ * copies of fetchBalance: setup saves what this call confirms, so a cached
+ * answer would "verify" a number DESCO has never heard of.
+ *
+ * Every prefix must answer with a DESCO refusal (a JSON body carrying a code)
+ * before "not_found" is reported; a timeout, a network fault or a 5xx means
+ * DESCO could not be asked at all, which is "unreachable" instead.
+ */
+export async function verifyDescoNumber(params: FetchBalanceParams): Promise<DescoNumberCheck> {
+    for (const prefix of prefixesFor(params)) {
+        const url = buildUrl(prefix, "getBalance", { accountNo: params.accountNo, meterNo: params.meterNo });
+
+        let data: { code?: unknown; data?: { balance?: unknown } | null } | undefined;
+        try {
+            const response = await axios.get(url, {
+                timeout: REQUEST_TIMEOUT_MS,
+                signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
+                httpsAgent,
+                headers: REQUEST_HEADERS,
+                validateStatus: () => true,
+            });
+            if (response.status >= 500) return "unreachable";
+            data = response.data;
+        } catch (error) {
+            console.warn(`${prefix}/getBalance could not be reached while verifying a number:`, (error as Error).message);
+            return "unreachable";
+        }
+
+        if (data?.code === 200 && data.data?.balance !== null && data.data?.balance !== undefined) {
+            // The very next step fetches the balance for these same params.
+            prefixMemo.set(memoKey(params), prefix);
+            return "found";
+        }
+
+        // A body carrying a code is DESCO answering; anything else is not.
+        if (typeof data?.code !== "number") return "unreachable";
+    }
+
+    return "not_found";
+}
+
 /** Requests in progress, so identical ones issued together share a single call. */
 const inFlight = new Map<string, Promise<unknown>>();
 

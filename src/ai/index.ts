@@ -8,6 +8,7 @@ import { sanitizeTelegramHtml, stripTelegramHtml } from "./telegramHtml";
 import { detectReplyLanguage } from "./language";
 import { countDescoCalls } from "../desco";
 import { userIdOf } from "../services/SupportService";
+import { performBalanceCheck } from "../utils/balanceChecker";
 
 export { isAiConfigured, resetSession };
 
@@ -39,6 +40,18 @@ export function roleFor(userId: number): Role {
     return userId === ADMIN_CHAT_ID ? "admin" : "user";
 }
 
+/**
+ * "balance", "balance koto?", "koto taka ache", "ব্যালেন্স কত". Answered with
+ * the card directly: through the model it now and then came back empty and
+ * the user got "sorry, I didn't understand" for the most common question.
+ */
+const PLAIN_BALANCE_REQUEST =
+    /^((my|amar|what'?s my|what is my)\s+)?(current\s+)?(balance|ব্যালেন্স)(\s+(koto|kot|check|dekhao|dekhaw|dekhan|dao|daw|koto ache|please|pls|now|কত|দেখাও))?$|^koto taka (ache|baki)$|^কত টাকা (আছে|বাকি)$/;
+
+function isPlainBalanceRequest(text: string): boolean {
+    return PLAIN_BALANCE_REQUEST.test(text.toLowerCase().replace(/[?!.।]/g, "").trim().replace(/\s+/g, " "));
+}
+
 export async function handleAiMessage(ctx: Context, text: string) {
     // The account answered about is the one acted on; the conversation stays
     // with the sender, so the admin's chat never lands in a user's history.
@@ -58,8 +71,20 @@ export async function handleAiMessage(ctx: Context, text: string) {
 
     await ctx.sendChatAction("typing");
 
-    const language = detectReplyLanguage(text) ?? session.language;
+    const detected = detectReplyLanguage(text);
+    const language = detected ?? session.language;
     session.language = language;
+
+    // The user's next guided flow greets them in this language, so it is worth
+    // saving as soon as the message carries a signal.
+    if (user && detected && detected !== user.language) {
+        await UserService.updateLanguage(userId, detected);
+    }
+
+    if (isPlainBalanceRequest(text) && (user?.accountNo || user?.meterNo)) {
+        await performBalanceCheck(ctx, { accountNo: user.accountNo, meterNo: user.meterNo });
+        return;
+    }
 
     try {
         // Counts requests that actually went to DESCO, not lookups: most are

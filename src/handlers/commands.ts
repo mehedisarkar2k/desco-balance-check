@@ -5,12 +5,10 @@ import { Markup } from "telegraf";
 import { formatCommandList } from "../botCommands";
 import { escapeHtml } from "../utils/html";
 import { userIdOf } from "../services/SupportService";
+import { startNumberStep } from "./onboarding";
 
 interface GuidedStep {
     step: string;
-    accountNo?: string;
-    meterNo?: string;
-    notificationTimes?: string[];
 }
 
 /** How long a half-finished guided step waits for its answer. */
@@ -63,12 +61,7 @@ export async function handleStart(ctx: Context) {
 
     if (!user || (!user.accountNo && !user.meterNo)) {
         // New user or user without account details
-        await ctx.reply(
-            "👋 Welcome to DESCO Balance Check Bot!\n\n" +
-            "Let's set up your account. I'll need either your Account Number or Meter Number (or both).\n\n" +
-            "Please enter your Account Number (or type 'skip' to omit):"
-        );
-        userSessions.set(userId, { step: "setup_account" });
+        await startNumberStep(ctx, "setup_number");
     } else {
         // Existing user
         await ctx.reply(
@@ -189,8 +182,7 @@ export async function handleBalance(ctx: Context) {
         );
     } else {
         // For users without saved details
-        userSessions.set(userId, { step: "waiting_for_account" });
-        await ctx.reply("Please enter your Account Number (or type 'skip' to omit):");
+        await startNumberStep(ctx, "one_off_number");
     }
 }
 

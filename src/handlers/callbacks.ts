@@ -8,11 +8,14 @@ import { ADMIN_CHAT_ID, bot } from "../bot";
 import {
     ANNOUNCE_CONFIRM,
     ANNOUNCE_DISMISS,
+    ANNOUNCE_EDIT,
+    getPendingVersion,
     sendPendingAnnouncement,
     dismissPendingAnnouncement,
 } from "../utils/announcer";
 import { ADMIN_REMOVE_PREFIX, userIdOf } from "../services/SupportService";
 import { LEAVE_CONFIRM_PREFIX, handleAdminRemove, handleLeaveConfirm } from "./support";
+import { startNumberStep } from "./onboarding";
 
 export async function handleCallbackQuery(ctx: Context) {
     const data = ctx.callbackQuery && "data" in ctx.callbackQuery ? ctx.callbackQuery.data : null;
@@ -22,7 +25,7 @@ export async function handleCallbackQuery(ctx: Context) {
 
     await ctx.answerCbQuery();
 
-    if (data === ANNOUNCE_CONFIRM || data === ANNOUNCE_DISMISS) {
+    if (data === ANNOUNCE_CONFIRM || data === ANNOUNCE_DISMISS || data === ANNOUNCE_EDIT) {
         // Broadcasting reaches every user, so it stays with the admin alone.
         if (ctx.from?.id !== ADMIN_CHAT_ID) {
             await ctx.reply("❌ Not available.");
@@ -31,6 +34,16 @@ export async function handleCallbackQuery(ctx: Context) {
 
         if (data === ANNOUNCE_DISMISS) {
             await ctx.reply(dismissPendingAnnouncement());
+            return;
+        }
+
+        if (data === ANNOUNCE_EDIT) {
+            if (!getPendingVersion()) {
+                await ctx.reply("⚠️ No announcement is pending.");
+                return;
+            }
+            userSessions.set(userId, { step: "announce_edit" });
+            await ctx.reply("✏️ What should change? Write it in any language, e.g. \"make it shorter\" or \"Banglay likho\". /cancel to stop.");
             return;
         }
 
@@ -106,11 +119,9 @@ export async function handleCallbackQuery(ctx: Context) {
             days
         );
     } else if (data === "enter_custom") {
-        userSessions.set(userId, { step: "waiting_for_account" });
-        await ctx.reply("Please enter your Account Number (or type 'skip' to omit):");
+        await startNumberStep(ctx, "one_off_number");
     } else if (data === "update_account") {
-        userSessions.set(userId, { step: "update_account_no" });
-        await ctx.reply("Please enter your new Account Number (or type 'skip' to keep current):");
+        await startNumberStep(ctx, "update_number");
     } else if (data === "update_times") {
         userSessions.set(userId, { step: "update_notification_times" });
         await ctx.reply(

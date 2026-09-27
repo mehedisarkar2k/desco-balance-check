@@ -1,7 +1,11 @@
 import { Context } from "telegraf";
 import { sendMessage, ADMIN_CHAT_ID } from "../bot";
 import { escapeHtml } from "./html";
-import { getBalanceReport, formatBalanceMessage } from "./usage";
+import { getBalanceReport } from "./usage";
+import { formatBalanceMessage } from "./balanceCard";
+import { UserService } from "../services/UserService";
+import { userIdOf } from "../services/SupportService";
+import { userLanguage } from "../ai/language";
 import {
     getOverview,
     formatOverviewMessage,
@@ -25,8 +29,16 @@ export async function performBalanceCheck(
 
     if (result.success && result.report) {
         const { data, usage, pending } = result.report;
+        const userId = userIdOf(ctx);
+        const user = userId ? await UserService.getUser(userId) : null;
+        const language = userLanguage(user, ctx);
+        const heading = language === "bn" ? "✅ DESCO ব্যালেন্স" : "✅ DESCO Balance";
         await ctx.reply(
-            formatBalanceMessage(data, usage, "✅ DESCO Balance", pending),
+            formatBalanceMessage(data, usage, {
+                language,
+                thresholdTaka: user?.threshold ?? 100,
+                thresholdDays: user?.thresholdDays ?? 3,
+            }, heading, pending),
             { parse_mode: "HTML" }
         );
         return;

@@ -8,10 +8,9 @@ import { escapeHtml } from "./utils/html";
 import { hourInBillingZone, parseTimes } from "./utils/times";
 import {
     getBalanceReport,
-    formatBalanceMessage,
-    formatLowBalanceAlert,
     isLowBalance,
 } from "./utils/usage";
+import { formatBalanceMessage, formatLowBalanceAlert } from "./utils/balanceCard";
 
 const threshold = Number(process.env.THRESHOLD) || 100;
 const DEFAULT_THRESHOLD_DAYS = 3;
@@ -77,6 +76,8 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
         const thresholdValue = user.threshold ?? threshold;
         const thresholdDays = user.thresholdDays ?? DEFAULT_THRESHOLD_DAYS;
         const low = isLowBalance(data.balance, usage, thresholdValue, thresholdDays);
+        const language = user.language ?? "en";
+        const cardOptions = { language, thresholdTaka: thresholdValue, thresholdDays };
 
         if (isHourlyCheck) {
             if (!low) {
@@ -98,7 +99,10 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
                 return data.balance;
             }
 
-            const sent = await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue, pending));
+            const sent = await sendTo(
+                userId,
+                formatLowBalanceAlert(data.balance, usage, { language, thresholdTaka: thresholdValue }, pending)
+            );
             if (!sent) {
                 // Not delivered, so give the claim back and let a later check retry.
                 await UserService.setLastLowAlertReadingDate(userId, user.lastLowAlertReadingDate ?? null);
@@ -106,10 +110,14 @@ async function checkAndNotifyUser(user: IUser, isHourlyCheck = false) {
             return data.balance;
         }
 
-        const delivered = await sendTo(userId, formatBalanceMessage(data, usage, "🔔 Scheduled Update", pending));
+        const heading = language === "bn" ? "🔔 সময়মতো আপডেট" : "🔔 Scheduled Update";
+        const delivered = await sendTo(userId, formatBalanceMessage(data, usage, cardOptions, heading, pending));
 
         if (delivered && low) {
-            await sendTo(userId, formatLowBalanceAlert(data.balance, usage, thresholdValue, pending));
+            await sendTo(
+                userId,
+                formatLowBalanceAlert(data.balance, usage, { language, thresholdTaka: thresholdValue }, pending)
+            );
         }
 
         return data.balance;

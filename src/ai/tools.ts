@@ -22,8 +22,9 @@ import {
     todayInBillingZone,
     dailyDeltas,
     DailyDelta,
+    getBalanceReport,
 } from "../utils/usage";
-import { formatBalanceMessage, getBalanceReport } from "../utils/usage";
+import { formatBalanceMessage } from "../utils/balanceCard";
 import { dailyTableHtml, getDailyUsage, getRecharges } from "../utils/overview";
 import { Session, activeSessionCount, registerDisplay } from "./session";
 import { staleAsOf } from "../descoStore";
@@ -400,9 +401,11 @@ const TOOLS: Record<string, Tool> = {
             name: "show_balance_update",
             description:
                 "Prepares the same balance update the daily reminder sends: balance, yesterday's usage, days " +
-                "left and this month's cost. Use when the user asks to be sent their reminder or an update now " +
-                "('reminder pathaw', 'update dao', 'send me my update'). Returns a displayMessage token: put it " +
-                "on its own line in the reply and the bot replaces it with the update.",
+                "left, this month's cost and advice. Use for a plain balance request ('balance', 'balance " +
+                "koto', 'koto taka ache', 'what's my balance') and when the user asks to be sent their " +
+                "reminder or an update now ('reminder pathaw', 'update dao', 'send me my update'). Returns " +
+                "a displayMessage token: put it on its own line in the reply and the bot replaces it with " +
+                "the update.",
         },
         handler: async (_args, ctx) => {
             const params = requireAccount(ctx);
@@ -416,8 +419,19 @@ const TOOLS: Record<string, Tool> = {
             // The exact message the scheduled reminder sends, so asking for it
             // in chat gets the same thing rather than the model's paraphrase.
             const { data, usage, pending } = result.report;
+            const user = await UserService.getUser(ctx.userId);
             return withFreshness({
-                displayMessage: registerDisplay(ctx.session, formatBalanceMessage(data, usage, "🔔 Balance Update", pending)),
+                displayMessage: registerDisplay(ctx.session, formatBalanceMessage(
+                    data,
+                    usage,
+                    {
+                        language: ctx.language,
+                        thresholdTaka: user?.threshold ?? 100,
+                        thresholdDays: user?.thresholdDays ?? 3,
+                    },
+                    ctx.language === "bn" ? "🔔 ব্যালেন্স আপডেট" : "🔔 Balance Update",
+                    pending
+                )),
                 balanceBDT: data.balance,
                 balanceDate: data.readingTime,
             }, data);
@@ -1120,8 +1134,10 @@ const TOOLS: Record<string, Tool> = {
         declaration: {
             name: "set_notification_times",
             description:
-                "Replaces the current user's own daily balance-reminder times. Call only when the user clearly " +
-                "asks to change them. The list given becomes the full set, so to move one time keep the others.",
+                "Replaces the current user's own daily balance-reminder times and switches the reminders " +
+                "on. Call only when the user clearly asks to change them. The times given REPLACE the " +
+                "current ones: the list is the full set. Keep the existing times only when the user says " +
+                "'also', 'add' or 'aro'.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
@@ -1142,14 +1158,16 @@ const TOOLS: Record<string, Tool> = {
             if (!before) return { error: "User not found." };
 
             await UserService.updateNotificationTimes(ctx.userId, times);
+            // Asking for a reminder time is asking for reminders, so they come
+            // on with it rather than waiting for a separate switch.
+            await UserService.updateSubscription(ctx.userId, true);
             await applyScheduleChange();
 
             return {
                 ok: true,
                 previousTimes: before.notificationTimes,
                 newTimes: times,
-                remindersActive: before.isSubscribed,
-                note: before.isSubscribed ? undefined : "Reminders are currently switched off, so these times take effect once the user subscribes.",
+                remindersActive: true,
             };
         },
     },

@@ -7,6 +7,7 @@ export interface IUser extends Document {
     lastName?: string;
     accountNo?: string;
     meterNo?: string;
+    language?: "bn" | "en"; // The language the user writes in, so replies match
     isSubscribed: boolean;
     notificationTimes: string[]; // e.g., ["08:00", "16:00"]
     threshold?: number;
@@ -33,6 +34,10 @@ const UserSchema = new Schema<IUser>(
         lastName: String,
         accountNo: String,
         meterNo: String,
+        language: {
+            type: String,
+            enum: ["bn", "en"],
+        },
         isSubscribed: {
             type: Boolean,
             default: false,

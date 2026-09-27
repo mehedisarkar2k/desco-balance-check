@@ -8,7 +8,7 @@ import { nowInBillingZone, shiftDate, todayInBillingZone } from "../utils/dates"
 
 dotenv.config();
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+export const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 /** Ceiling on tool round trips, so a model that keeps calling tools terminates. */
 const MAX_TOOL_ROUNDS = 6;
@@ -22,7 +22,7 @@ export function isAiConfigured(): boolean {
     return Boolean(process.env.GEMINI_API_KEY);
 }
 
-function getClient(): GoogleGenAI {
+export function getClient(): GoogleGenAI {
     if (!client) {
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
@@ -50,9 +50,11 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "You can also change the user's OWN bot settings when they clearly ask: reminder times, the low",
         "balance threshold, the days-left warning, reminders on/off, and the hourly low-balance re-check.",
         "- Several changes in one message means several tool calls; make them all.",
-        "- When moving one reminder time, first read the current times and keep the others.",
-        "- A bare hour follows the existing reminder it replaces (8 to 9 means 08:00 to 09:00); if it is",
-        "  genuinely unclear whether morning or evening is meant, ask before changing anything.",
+        "- The reminder times given replace the current ones: the list is the full set. Keep the existing",
+        "  times only when the user says 'also', 'add', 'aro' or 'o' ('rat 10 tay o'). 'sokal 8 tay",
+        "  reminder dao' with reminders at 09:00 means [\"08:00\"] alone, not [\"08:00\", \"09:00\"].",
+        "- A bare hour is morning if 'sokal', 'am' or 'morning' is said, evening if 'rat', 'bikel', 'pm'",
+        "  or 'evening' is; if it is genuinely unclear, ask before changing anything.",
         "- Say a change was made only when the tool returned ok, and state the old and new values it",
         "  returned. If it returned an error, say what was wrong and change nothing else silently.",
         "- You cannot change the DESCO account or meter number; for that the user must use /update.",
@@ -102,6 +104,10 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "  left are more than balance divided by the daily cost.",
         "",
         "Money questions:",
+        "- A plain balance request ('balance', 'balance koto', 'koto taka ache', 'what's my balance'): call",
+        "  show_balance_update and reply with only its displayMessage token on its own line. Use",
+        "  get_balance only for specific questions about the figures: a rate, a particular day, a",
+        "  comparison.",
         "- How much to recharge or load, for any date, month or trip: call plan_recharge with the last day",
         "  to cover, and reply with only its displayCard token. The card is the whole answer: run-out date,",
         "  every option, fixed charges, warnings and the assumption.",

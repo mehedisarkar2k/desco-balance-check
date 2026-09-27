@@ -491,7 +491,7 @@ export function formatOverviewMessage(overview: Overview): string {
     }
 
     if (usage) {
-        lines.push("", forecastNote(usage));
+        lines.push("", forecastNote("en"));
     }
 
     if (overview.staleLine) {

@@ -55,13 +55,13 @@ export interface CardInput {
     savedCopyAsOf: string | null;
 }
 
-const MONTHS = {
+export const MONTHS = {
     en: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
     bn: ["জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন", "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর"],
 };
 
 /** "সেপ্টেম্বরের", for "by 30 September". The ending follows the name's last sound. */
-const MONTHS_BN_OF = [
+export const MONTHS_BN_OF = [
     "জানুয়ারির", "ফেব্রুয়ারির", "মার্চের", "এপ্রিলের", "মে-র", "জুনের",
     "জুলাইয়ের", "আগস্টের", "সেপ্টেম্বরের", "অক্টোবরের", "নভেম্বরের", "ডিসেম্বরের",
 ];

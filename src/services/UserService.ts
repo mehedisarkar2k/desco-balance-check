@@ -1,4 +1,6 @@
 import { User, IUser } from "../models/User";
+import type { ReplyLanguage } from "../ai/language";
+import type { NumberKind } from "../utils/onboardingText";
 
 export class UserService {
     /**
@@ -40,21 +42,46 @@ export class UserService {
     }
 
     /**
-     * Update user account details
+     * Save one DESCO number. The other kind is cleared: the bot works out
+     * which kind a number is, so keeping an old number of the other kind
+     * could leave two numbers that belong to different accounts.
      */
-    static async updateAccountDetails(
+    static async setDescoNumber(
         telegramId: number,
-        accountNo?: string,
-        meterNo?: string
+        kind: NumberKind,
+        number: string
     ): Promise<IUser | null> {
-        const user = await User.findOne({ telegramId });
-        if (!user) return null;
+        const update =
+            kind === "account"
+                ? { accountNo: number, $unset: { meterNo: "" } }
+                : { meterNo: number, $unset: { accountNo: "" } };
 
-        if (accountNo !== undefined) user.accountNo = accountNo;
-        if (meterNo !== undefined) user.meterNo = meterNo;
+        return await User.findOneAndUpdate({ telegramId }, update, { new: true });
+    }
 
-        await user.save();
-        return user;
+    /** Reminders and low-balance alerts as a new user gets them by default. */
+    static async enableDefaultAlerts(telegramId: number): Promise<IUser | null> {
+        return await User.findOneAndUpdate(
+            { telegramId },
+            {
+                isSubscribed: true,
+                notificationTimes: ["09:00"],
+                hourlyNotificationEnabled: true,
+            },
+            { new: true }
+        );
+    }
+
+    /** Remember the language the user writes in, so replies match. */
+    static async updateLanguage(
+        telegramId: number,
+        language: ReplyLanguage
+    ): Promise<IUser | null> {
+        return await User.findOneAndUpdate(
+            { telegramId },
+            { language },
+            { new: true }
+        );
     }
 
     /**
