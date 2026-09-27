@@ -61,6 +61,39 @@ One adapter per provider, each declaring what it supports (balance, daily usage,
 - **Privacy.** WZPDCL, and one BREB endpoint, return a real person's name, address and mobile number (BREB also NID and date of birth) for any number typed in. Only ever look up numbers the bot's own users supply. Do not build on the BREB endpoint.
 - **Access can vanish.** Every one of these is undocumented; DPDC closed theirs overnight. Each adapter must fail gracefully and tell the user plainly.
 
+## Admin: user list, contact and support threads
+
+Today the admin finds users with "list users" in chat and removes one with "X ke remove koro", which sends a confirm button. Users have /support (a one-time code that lets the admin act for them with /actas) and /leave.
+
+### Part 1: user list and contact (easy, about 200 lines)
+
+1. `/users` (admin only): one button per user name, 10 per page, with ◀ ▶.
+2. Tapping a name shows a card: name, @username, ID, joined, subscribed, account set up. Buttons: 💬 Contact, ⚙️ Actions, ⬅ Back.
+3. Actions: 🗑 Remove for now, reusing the existing confirm-and-delete (`admin_remove:` in `src/handlers/support.ts`). Later actions go on this screen.
+4. Contact: the bot asks what to say; the admin types a rough note in any language; the AI turns it into a polished message and shows a preview with 📤 Send, ✏️ Change, 🗑 Discard. Nothing reaches the user until Send.
+   - Keep one pending draft, and put its number in the button data, so Send on an older preview cannot send the newer text.
+   - Report a failed delivery (403 means the user blocked the bot) instead of claiming it was sent.
+
+### Part 2: support threads (medium; the risky part, about 200 more lines)
+
+5. Send opens a thread with that user. While it is open, the user's messages go to the admin as "💬 Name (ID …): …" instead of to the AI. The admin replies with Telegram's reply, and the reply goes to the user. A Close button, or a period without messages, ends it.
+   - Store the open thread on the user's record, not in memory: restarts would otherwise drop it and the user's messages would silently go to the AI.
+   - Find the user for a reply by reading the ID in the message being replied to, so nothing else needs storing and it survives restarts.
+   - Commands keep working during a thread. Text only at first; photos and voice need more work.
+   - Taking messages away from the AI is where bugs would hurt: test ignored, misrouted and restart cases on the selftest DB.
+
+Part 1 does not need redoing when Part 2 is added.
+
+### Open decisions
+
+- Language of the polished message: always Bangla, always English, or the language of the admin's note.
+- In a thread, whether every user message goes to the admin or only replies to the admin's message; and the idle time before it closes (24 hours?).
+- Whether the admin's replies in a thread go as typed or get AI polish with a preview.
+
+### Known issue to fix alongside
+
+After a removal the bot says "They've been told" even when the message was not delivered: `sendMessage` in `src/bot.ts` logs a failed send and carries on. The removal notice itself is English only.
+
 ## Proposed order
 
 1. Multi-meter model with a provider field, plus the adapter interface; DESCO becomes the first adapter.
@@ -69,6 +102,7 @@ One adapter per provider, each declaring what it supports (balance, daily usage,
 4. Remaining alerts: computed recharge advice, spike alerts, recharge-received notification.
 5. ekpay name confirmation at signup.
 6. WZPDCL, only if users ask.
+7. Admin user list and contact (Part 1 above); support threads (Part 2) after it.
 
 Not planned without an official partnership: DPDC, BPDB, BREB prepaid.
 
