@@ -8,6 +8,14 @@ import { escapeHtml } from "../utils/html";
 /** A support code has to be used this soon after the user asked for it. */
 const CODE_TTL_MS = 15 * 60 * 1000;
 
+/** Callback data for the admin's confirm button when removing a user from chat; the id follows it. */
+export const ADMIN_REMOVE_PREFIX = "admin_remove:";
+
+/** The last message a user gets when the admin removes them. */
+export const REMOVED_MESSAGE =
+    "👋 The admin has removed your account from this bot, as you asked. Your saved details are deleted " +
+    "and you won't get any more messages.\n\nSend /start any time to come back.";
+
 /** Acting for a user ends on its own after this long. */
 export const ACTING_TTL_MS = 60 * 60 * 1000;
 
@@ -110,8 +118,7 @@ export async function stopActing(reason: StopReason): Promise<void> {
     console.log(`Admin stopped acting for ${userId} (${reason})`);
 
     const userMessage = reason === "removed"
-        ? "👋 The admin has removed your account from this bot, as you asked. Your saved details are deleted " +
-          "and you won't get any more messages.\n\nSend /start any time to come back."
+        ? REMOVED_MESSAGE
         : "✅ The admin has finished helping with your account and can no longer access it.";
     await sendMessage(userMessage, userId);
 

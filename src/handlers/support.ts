@@ -1,6 +1,8 @@
 import { Context, Markup } from "telegraf";
 import { UserService } from "../services/UserService";
 import {
+    ADMIN_REMOVE_PREFIX,
+    REMOVED_MESSAGE,
     actingFor,
     describeUser,
     issueSupportCode,
@@ -126,6 +128,22 @@ export async function handleLeave(ctx: Context) {
     });
 }
 
+/** Deletes a user and everything the bot keeps for them. */
+async function removeUser(userId: number): Promise<void> {
+    const user = await UserService.getUser(userId);
+    await UserService.deleteUser(userId);
+    userSessions.delete(userId);
+    resetSession(userId);
+
+    // Saved DESCO copies are per account, and a family often shares one; they
+    // go only when nobody else in the bot still uses the account.
+    const hasAccount = Boolean(user?.accountNo || user?.meterNo);
+    if (user && hasAccount && !(await User.exists({ accountNo: user.accountNo, meterNo: user.meterNo }))) {
+        await deleteSnapshotsFor(user.accountNo, user.meterNo);
+    }
+    await refreshSchedules();
+}
+
 export async function handleLeaveConfirm(ctx: Context, data: string) {
     const userId = userIdOf(ctx);
     const confirmedFor = Number(data.slice(LEAVE_CONFIRM_PREFIX.length));
@@ -135,18 +153,7 @@ export async function handleLeaveConfirm(ctx: Context, data: string) {
     }
 
     const forSomeoneElse = userId !== ctx.from?.id;
-    const user = await UserService.getUser(userId);
-    await UserService.deleteUser(userId);
-    userSessions.delete(userId);
-
-    // Saved DESCO copies are per account, and a family often shares one; they
-    // go only when nobody else in the bot still uses the account.
-    const hasAccount = Boolean(user?.accountNo || user?.meterNo);
-    if (user && hasAccount && !(await User.exists({ accountNo: user.accountNo, meterNo: user.meterNo }))) {
-        await deleteSnapshotsFor(user.accountNo, user.meterNo);
-    }
-    resetSession(userId);
-    await refreshSchedules();
+    await removeUser(userId);
 
     if (forSomeoneElse) {
         await stopActing("removed");
@@ -158,4 +165,29 @@ export async function handleLeaveConfirm(ctx: Context, data: string) {
         "👋 You've left the bot. Your saved details are deleted and you won't get any more messages.\n\n" +
         "Send /start any time to come back."
     );
+}
+
+/** The admin's confirm button from asking the chat to remove someone. */
+export async function handleAdminRemove(ctx: Context, data: string) {
+    if (ctx.from?.id !== ADMIN_CHAT_ID) {
+        await ctx.reply("❌ Not available.");
+        return;
+    }
+
+    const userId = Number(data.slice(ADMIN_REMOVE_PREFIX.length));
+    const user = Number.isInteger(userId) ? await UserService.getUser(userId) : null;
+    if (!user || userId === ADMIN_CHAT_ID) {
+        await ctx.reply("Nothing to remove: that user is already gone.");
+        return;
+    }
+
+    const who = describeUser(user);
+    await removeUser(userId);
+
+    if (actingFor()?.userId === userId) {
+        await stopActing("removed");
+    } else {
+        await sendMessage(REMOVED_MESSAGE, userId);
+    }
+    await ctx.reply(`✅ Removed ${who}. They've been told.`, { parse_mode: "HTML" });
 }

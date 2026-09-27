@@ -31,6 +31,8 @@ import { nowInBillingZone, shiftDate } from "../utils/dates";
 import { parseTimes } from "../utils/times";
 import type { ReplyLanguage } from "./language";
 import { CardOption, renderRechargeCard, renderSimulationCard } from "./rechargeCard";
+import { ADMIN_CHAT_ID, bot } from "../bot";
+import { ADMIN_REMOVE_PREFIX, describeUser } from "../services/SupportService";
 
 export type Role = "user" | "admin";
 
@@ -1266,18 +1268,27 @@ const TOOLS: Record<string, Tool> = {
         declaration: {
             name: "list_users",
             description:
-                "ADMIN ONLY. Lists people registered with this bot, with their subscription status. " +
-                "Does not include DESCO account numbers or balances.",
+                "ADMIN ONLY. Lists people registered with this bot, newest first, with their subscription " +
+                "status. Does not include DESCO account numbers or balances.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
                     limit: { type: Type.NUMBER, description: "Maximum users to return, up to 50." },
+                    name: {
+                        type: Type.STRING,
+                        description: "Optional. Only users whose first name, last name or username contains this.",
+                    },
                 },
             },
         },
         handler: async (args) => {
             const limit = Math.min(Math.max(Math.round(args?.limit ?? 20), 1), 50);
-            const users = await User.find()
+            const name = String(args?.name ?? "").trim();
+            const pattern = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+            const filter = name
+                ? { $or: [{ firstName: pattern }, { lastName: pattern }, { username: pattern }] }
+                : {};
+            const users = await User.find(filter)
                 .sort({ createdAt: -1 })
                 .limit(limit)
                 .select("telegramId username firstName isSubscribed notificationTimes createdAt blockedAt accountNo meterNo");
@@ -1293,6 +1304,54 @@ const TOOLS: Record<string, Tool> = {
                     blocked: Boolean(user.blockedAt),
                     joined: user.createdAt?.toISOString().slice(0, 10) ?? null,
                 })),
+            };
+        },
+    },
+
+    remove_user: {
+        minRole: "admin",
+        declaration: {
+            name: "remove_user",
+            description:
+                "ADMIN ONLY. Asks the admin to confirm removing one user from the bot. Sends the admin a " +
+                "message with that user's name and a confirm button; nothing is deleted until the admin " +
+                "presses it. Removing deletes the user's saved details and stops all messages to them.",
+            parameters: {
+                type: Type.OBJECT,
+                properties: {
+                    telegramId: { type: Type.NUMBER, description: "The user's telegramId, from list_users." },
+                },
+                required: ["telegramId"],
+            },
+        },
+        handler: async (args) => {
+            const telegramId = Number(args?.telegramId);
+            if (!Number.isInteger(telegramId)) return { error: "telegramId must be a whole number from list_users." };
+            if (telegramId === ADMIN_CHAT_ID) return { error: "The admin's own account cannot be removed this way." };
+
+            const user = await UserService.getUser(telegramId);
+            if (!user) return { error: "No user with that telegramId." };
+
+            // The button, not the model, is the confirmation: whatever the
+            // conversation says, deleting takes a press by the admin.
+            await bot.telegram.sendMessage(
+                ADMIN_CHAT_ID,
+                `🗑 Remove ${describeUser(user)} from the bot? Their saved details are deleted and they ` +
+                "get no more messages. They'll be told.",
+                {
+                    parse_mode: "HTML",
+                    reply_markup: {
+                        inline_keyboard: [
+                            [{ text: "🗑 Yes, remove", callback_data: `${ADMIN_REMOVE_PREFIX}${telegramId}` }],
+                            [{ text: "❌ Cancel", callback_data: "cancel" }],
+                        ],
+                    },
+                }
+            );
+
+            return {
+                confirmationSent: true,
+                note: "A message with a confirm button was sent just above. Nothing is removed until the admin presses it.",
             };
         },
     },

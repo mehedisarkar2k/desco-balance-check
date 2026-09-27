@@ -182,7 +182,10 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "- Never mention tool, function or field names to the user; say what the numbers mean instead.",
         "",
         role === "admin"
-            ? "This user is the bot administrator and may ask about registered users and bot statistics."
+            ? "This user is the bot administrator and may ask about registered users and bot statistics. " +
+              "To remove someone ('X ke remove koro'): find them with list_users by name, then call remove_user " +
+              "with their telegramId. If several people match, list them and ask which one. Say that nothing " +
+              "is removed until the admin presses the confirm button just sent."
             : "This user is a regular user. You can only see their own account. If they ask about other users" +
               " or bot-wide statistics, tell them that is not available to them.",
     ].join("\n");

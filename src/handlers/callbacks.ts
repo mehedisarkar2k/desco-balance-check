@@ -11,8 +11,8 @@ import {
     sendPendingAnnouncement,
     dismissPendingAnnouncement,
 } from "../utils/announcer";
-import { userIdOf } from "../services/SupportService";
-import { LEAVE_CONFIRM_PREFIX, handleLeaveConfirm } from "./support";
+import { ADMIN_REMOVE_PREFIX, userIdOf } from "../services/SupportService";
+import { LEAVE_CONFIRM_PREFIX, handleAdminRemove, handleLeaveConfirm } from "./support";
 
 export async function handleCallbackQuery(ctx: Context) {
     const data = ctx.callbackQuery && "data" in ctx.callbackQuery ? ctx.callbackQuery.data : null;
@@ -36,6 +36,11 @@ export async function handleCallbackQuery(ctx: Context) {
 
         await ctx.reply("📢 Sending announcement...");
         await ctx.reply(await sendPendingAnnouncement(bot), { parse_mode: "HTML" });
+        return;
+    }
+
+    if (data.startsWith(ADMIN_REMOVE_PREFIX)) {
+        await handleAdminRemove(ctx, data);
         return;
     }
 
