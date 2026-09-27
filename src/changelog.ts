@@ -11,6 +11,21 @@ export interface Release {
 }
 
 export const CHANGELOG: Record<string, Release> = {
+    "2.1.0": {
+        title: "Clearer balance, recharge help, and replies in your language",
+        notes: [
+            "👋 <b>Haven't set up yet?</b> Send /start. It's just one number now, your account or meter number, and the bot checks it with DESCO for you.",
+            "🔔 <b>Want a daily update?</b> Type <i>\"reminder 9 tay dao\"</i> and your balance comes every morning.",
+            "💰 <b>Balance with advice.</b> Type <i>\"balance\"</i> or <i>\"balance koto\"</i> and you get a clear card. It ends with one line on what to do: recharge soon, recharge before a date, or nothing to do for now.",
+            "🗣 <b>Your language.</b> If you chat in Bangla or Banglish, the daily update and the low-balance alert now come in Bangla too.",
+            "🔌 <b>How much to recharge.</b> Ask <i>\"10 tarikh porjonto koto recharge lagbe?\"</i> or <i>\"500 dile koto din cholbe?\"</i>. You get the amount, a safe amount and the date it runs out. Ask for the <i>\"hiseb\"</i> to see the slab-by-slab calculation.",
+            "✈️ <b>Going away?</b> Tell it your dates, like <i>\"10 tarikh gram e jabo, 8 nov e ashbo\"</i>, and it plans the recharge around the trip, even with a fridge left on.",
+            "🧾 <b>Fixed charges shown.</b> Each month's demand charge is taken from your next recharge. The balance card now shows what is waiting, so a smaller-than-usual recharge makes sense.",
+            "⏰ <b>Change reminders by chat.</b> <i>\"sokal 8 tay reminder dao\"</i> or <i>\"200 taka hole janaw\"</i>. Setting a time also turns reminders on.",
+            "🆘 <b>If power runs out,</b> the low-balance alert explains the meter's emergency button.",
+            "🙋 /support reaches the admin. /leave deletes your details.",
+        ],
+    },
     "2.0.0": {
         title: "See exactly what you pay per unit",
         notes: [
