@@ -64,6 +64,27 @@ bot.command("done", handleDone);
 bot.on("callback_query", handleCallbackQuery);
 bot.on("text", handleTextMessage);
 
+/**
+ * Checks the token with Telegram, retrying network failures. A single failed
+ * request used to end the start-up, and a deploy failed on one blip between
+ * the host and Telegram. A rejected token (401) is not retried.
+ */
+async function authenticateWithRetry(attempts = 5) {
+    for (let attempt = 1; ; attempt++) {
+        try {
+            const botInfo = await bot.telegram.getMe();
+            console.log(`✅ Bot authenticated as: @${botInfo.username}`);
+            return;
+        } catch (authError: any) {
+            console.error(`❌ Failed to authenticate bot (attempt ${attempt}/${attempts}):`, authError.message);
+            if (authError?.response?.error_code === 401 || attempt >= attempts) {
+                throw new Error('Bot token invalid or network issue');
+            }
+            await new Promise(resolve => setTimeout(resolve, attempt * 5000));
+        }
+    }
+}
+
 (async () => {
     try {
         // Check environment
@@ -77,14 +98,7 @@ bot.on("text", handleTextMessage);
             console.log('⚠️  If you see 409 errors, another instance is already running!');
         }
 
-        // Check if bot is already running by trying to get bot info
-        try {
-            const botInfo = await bot.telegram.getMe();
-            console.log(`✅ Bot authenticated as: @${botInfo.username}`);
-        } catch (authError: any) {
-            console.error('❌ Failed to authenticate bot:', authError.message);
-            throw new Error('Bot token invalid or network issue');
-        }
+        await authenticateWithRetry();
 
         // Start health check server (required for Render)
         console.log("Starting health check server...");
