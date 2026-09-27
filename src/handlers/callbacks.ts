@@ -11,10 +11,12 @@ import {
     sendPendingAnnouncement,
     dismissPendingAnnouncement,
 } from "../utils/announcer";
+import { userIdOf } from "../services/SupportService";
+import { LEAVE_CONFIRM_PREFIX, handleLeaveConfirm } from "./support";
 
 export async function handleCallbackQuery(ctx: Context) {
     const data = ctx.callbackQuery && "data" in ctx.callbackQuery ? ctx.callbackQuery.data : null;
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
 
     if (!userId || !data) return;
 
@@ -22,7 +24,7 @@ export async function handleCallbackQuery(ctx: Context) {
 
     if (data === ANNOUNCE_CONFIRM || data === ANNOUNCE_DISMISS) {
         // Broadcasting reaches every user, so it stays with the admin alone.
-        if (userId !== ADMIN_CHAT_ID) {
+        if (ctx.from?.id !== ADMIN_CHAT_ID) {
             await ctx.reply("❌ Not available.");
             return;
         }
@@ -34,6 +36,11 @@ export async function handleCallbackQuery(ctx: Context) {
 
         await ctx.reply("📢 Sending announcement...");
         await ctx.reply(await sendPendingAnnouncement(bot), { parse_mode: "HTML" });
+        return;
+    }
+
+    if (data.startsWith(LEAVE_CONFIRM_PREFIX)) {
+        await handleLeaveConfirm(ctx, data);
         return;
     }
 

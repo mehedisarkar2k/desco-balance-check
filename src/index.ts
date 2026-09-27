@@ -7,6 +7,8 @@ import { autoRegisterMiddleware } from "./middleware/autoRegister";
 import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleSubscribe, handleUsage, handleRecharges, handleCancel, userSessions } from "./handlers/commands";
 import { handleCallbackQuery } from "./handlers/callbacks";
 import { handleTextMessage } from "./handlers/textMessages";
+import { handleSupport, handleActAs, handleDone, handleLeave } from "./handlers/support";
+import { userIdOf } from "./services/SupportService";
 import { startBotWithRetry, markShuttingDown } from "./utils/botLauncher";
 import { BOT_COMMANDS } from "./botCommands";
 import { offerVersionAnnouncement } from "./utils/announcer";
@@ -19,8 +21,9 @@ bot.use(autoRegisterMiddleware);
 // dropped before the command runs. Otherwise the step kept catching messages.
 bot.use(async (ctx, next) => {
     const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
-    if (ctx.from && text.startsWith("/")) {
-        userSessions.delete(ctx.from.id);
+    const userId = userIdOf(ctx);
+    if (userId && text.startsWith("/")) {
+        userSessions.delete(userId);
     }
     await next();
 });
@@ -51,6 +54,11 @@ bot.command("usage", handleUsage);
 bot.command("cancel", handleCancel);
 bot.command("recharges", handleRecharges);
 bot.command("subscribe", handleSubscribe);
+bot.command("support", handleSupport);
+bot.command("leave", handleLeave);
+// Admin only, and left out of the command menu.
+bot.command("actas", handleActAs);
+bot.command("done", handleDone);
 
 // Register event handlers
 bot.on("callback_query", handleCallbackQuery);

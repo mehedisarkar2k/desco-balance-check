@@ -14,6 +14,8 @@ export interface IUser extends Document {
     hourlyNotificationEnabled: boolean; // Enable hourly notifications when below threshold
     lastLowAlertReadingDate?: string; // DESCO readingTime of the last low-balance alert
     blockedAt?: Date; // Set when Telegram reports the user unreachable
+    supportCode?: string; // One-time code the user can share so the admin can act for them
+    supportCodeExpiresAt?: Date;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -53,6 +55,8 @@ const UserSchema = new Schema<IUser>(
         },
         lastLowAlertReadingDate: String,
         blockedAt: Date,
+        supportCode: String,
+        supportCodeExpiresAt: Date,
     },
     {
         timestamps: true,

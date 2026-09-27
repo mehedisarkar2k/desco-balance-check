@@ -6,9 +6,10 @@ import { refreshSchedules } from "../scheduler";
 import { MIN_OVERVIEW_DAYS, MAX_OVERVIEW_DAYS } from "../utils/overview";
 import { handleAiMessage } from "../ai";
 import { parseTimes } from "../utils/times";
+import { userIdOf } from "../services/SupportService";
 
 export async function handleTextMessage(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     const text = ctx.message && "text" in ctx.message ? ctx.message.text : null;
 
     if (!userId || !text) return;

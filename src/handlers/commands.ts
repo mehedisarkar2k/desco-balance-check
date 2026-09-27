@@ -4,6 +4,7 @@ import { ADMIN_USERNAME } from "../bot";
 import { Markup } from "telegraf";
 import { formatCommandList } from "../botCommands";
 import { escapeHtml } from "../utils/html";
+import { userIdOf } from "../services/SupportService";
 
 interface GuidedStep {
     step: string;
@@ -46,7 +47,7 @@ class ExpiringSteps extends Map<number, GuidedStep> {
 export const userSessions = new ExpiringSteps();
 
 export async function handleCancel(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     if (!userId) return;
 
     // Any command already clears a pending step (see index.ts); this is the
@@ -55,7 +56,7 @@ export async function handleCancel(ctx: Context) {
 }
 
 export async function handleStart(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     if (!userId) return;
 
     const user = await UserService.getUser(userId);
@@ -93,13 +94,13 @@ You can also type a question instead of using a command — for example
 <b>About Subscriptions:</b>
 When subscribed, you'll receive automatic balance notifications at your chosen times. You can also set a low balance threshold for alerts.
 
-Need assistance? Contact @${ADMIN_USERNAME}
+Need help? Use /support to contact @${ADMIN_USERNAME}. To stop using the bot, use /leave.
 `;
     await ctx.reply(helpText, { parse_mode: "HTML" });
 }
 
 export async function handleMe(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     if (!userId) return;
 
     const user = await UserService.getUser(userId);
@@ -149,7 +150,7 @@ ${alertConditions.join("\n")}
 }
 
 export async function handleUpdate(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     if (!userId) return;
 
     await ctx.reply(
@@ -167,7 +168,7 @@ export async function handleUpdate(ctx: Context) {
 
 export async function handleBalance(ctx: Context) {
     const username = ctx.from?.username;
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
 
     if (!userId) {
         await ctx.reply("Unable to identify user.");
@@ -194,7 +195,7 @@ export async function handleBalance(ctx: Context) {
 }
 
 export async function handleUsage(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     if (!userId) return;
 
     const user = await UserService.getUser(userId);
@@ -222,7 +223,7 @@ export async function handleUsage(ctx: Context) {
 }
 
 export async function handleRecharges(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     if (!userId) return;
 
     const user = await UserService.getUser(userId);
@@ -249,7 +250,7 @@ export async function handleRecharges(ctx: Context) {
 }
 
 export async function handleSubscribe(ctx: Context) {
-    const userId = ctx.from?.id;
+    const userId = userIdOf(ctx);
     if (!userId) return;
 
     const user = await UserService.getUser(userId);

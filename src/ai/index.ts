@@ -7,6 +7,7 @@ import { Role } from "./tools";
 import { sanitizeTelegramHtml, stripTelegramHtml } from "./telegramHtml";
 import { detectReplyLanguage } from "./language";
 import { countDescoCalls } from "../desco";
+import { userIdOf } from "../services/SupportService";
 
 export { isAiConfigured, resetSession };
 
@@ -39,8 +40,11 @@ export function roleFor(userId: number): Role {
 }
 
 export async function handleAiMessage(ctx: Context, text: string) {
-    const userId = ctx.from?.id;
-    if (!userId) return;
+    // The account answered about is the one acted on; the conversation stays
+    // with the sender, so the admin's chat never lands in a user's history.
+    const senderId = ctx.from?.id;
+    const userId = userIdOf(ctx);
+    if (!senderId || !userId) return;
 
     if (!isAiConfigured()) {
         await ctx.reply(
@@ -50,7 +54,7 @@ export async function handleAiMessage(ctx: Context, text: string) {
     }
 
     const user = await UserService.getUser(userId);
-    const { session, isNew } = getSession(userId);
+    const { session, isNew } = getSession(senderId);
 
     await ctx.sendChatAction("typing");
 
@@ -81,7 +85,7 @@ export async function handleAiMessage(ctx: Context, text: string) {
 
         // The admin gets the real error. Debugging this blind means guessing at
         // which of the API key, model name or request shape was rejected.
-        if (roleFor(userId) === "admin") {
+        if (roleFor(senderId) === "admin") {
             const detail = String(error?.message || error).slice(0, 600);
             await ctx.reply(
                 `🤖 <b>AI request failed</b>\n\n<code>${escapeHtml(detail)}</code>`,

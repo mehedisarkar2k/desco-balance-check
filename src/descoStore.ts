@@ -63,6 +63,16 @@ export async function readSnapshot<T>(key: string): Promise<Snapshot<T> | null> 
     }
 }
 
+/**
+ * Removes every saved copy for one account ("<kind>:<accountNo>:<meterNo>"),
+ * for when the last person using it leaves the bot.
+ */
+export async function deleteSnapshotsFor(accountNo?: string, meterNo?: string): Promise<number> {
+    const suffix = `:${accountNo ?? ""}:${meterNo ?? ""}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const result = await DescoSnapshot.deleteMany({ key: { $regex: `^[^:]+${suffix}$` } });
+    return result.deletedCount;
+}
+
 export async function writeSnapshot(key: string, payload: unknown, coveredFrom?: string): Promise<void> {
     if (!dbReady()) return;
     try {
