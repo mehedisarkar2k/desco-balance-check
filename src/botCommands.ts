@@ -19,6 +19,7 @@ export const BOT_COMMANDS = [
     { command: "subscribe", description: "Enable/disable automatic balance notifications" },
     { command: "help", description: "View all available commands and how to use them" },
     { command: "support", description: "Contact the admin for help" },
+    { command: "tickets", description: "Review open support tickets (admin)" },
     { command: "leave", description: "Stop using this bot and delete your details" },
     { command: "cancel", description: "Stop the step you are in" },
 ] as const;
