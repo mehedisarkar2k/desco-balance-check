@@ -1,5 +1,7 @@
 import type { Content } from "@google/genai";
 import type { ReplyLanguage } from "./language";
+import type { TicketMessage } from "../models/SupportTicket";
+import { stripTelegramHtml } from "./telegramHtml";
 
 /**
  * How long a conversation stays "the same session". Coming back after this
@@ -39,7 +41,7 @@ export interface Session {
 
 const sessions = new Map<number, Session>();
 
-function createSession(userId: number, now: number): Session {
+export function createSession(userId: number, now = Date.now()): Session {
     return {
         userId,
         startedAt: now,
@@ -114,6 +116,25 @@ export function appendHistory(session: Session, entries: Content[]) {
 
 export function resetSession(userId: number) {
     sessions.delete(userId);
+}
+
+/** Snapshot only chat text, never tool payloads, system directives or support codes. */
+export function supportTranscript(userId: number): TicketMessage[] {
+    const session = sessions.get(userId);
+    if (!session || Date.now() - session.lastActiveAt >= SESSION_IDLE_MS) return [];
+    const messages: TicketMessage[] = [];
+    for (const content of session.history) {
+        if (content.parts?.some((part) => part.functionCall || part.functionResponse)) continue;
+        const text = content.role === "user"
+            ? content.parts?.[0]?.text
+            : content.parts?.filter((part) => !part.thought).map((part) => part.text ?? "").join("\n");
+        if (!text || (content.role !== "user" && content.role !== "model")) continue;
+        const plain = (content.role === "user" ? text : stripTelegramHtml(expandDisplays(session, text)))
+            .replace(/\b\d{6}\b/g, "[6-digit code omitted]").trim();
+        if (!plain) continue;
+        messages.push({ role: content.role === "user" ? "user" : "bot", text: plain.slice(0, 1500) });
+    }
+    return messages.slice(-6);
 }
 
 /**

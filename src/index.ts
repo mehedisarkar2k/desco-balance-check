@@ -8,6 +8,8 @@ import { handleStart, handleHelp, handleMe, handleUpdate, handleBalance, handleS
 import { handleCallbackQuery } from "./handlers/callbacks";
 import { handleTextMessage } from "./handlers/textMessages";
 import { handleSupport, handleActAs, handleDone, handleLeave } from "./handlers/support";
+import { handleTickets, handleTicket } from "./handlers/tickets";
+import { handleSupportReplyCommand } from "./handlers/supportConversation";
 import { userIdOf } from "./services/SupportService";
 import { startBotWithRetry, markShuttingDown } from "./utils/botLauncher";
 import { BOT_COMMANDS } from "./botCommands";
@@ -59,6 +61,9 @@ bot.command("leave", handleLeave);
 // Admin only, and left out of the command menu.
 bot.command("actas", handleActAs);
 bot.command("done", handleDone);
+bot.command("tickets", handleTickets);
+bot.command("ticket", (ctx) => handleTicket(ctx));
+bot.command("reply", handleSupportReplyCommand);
 
 // Register event handlers
 bot.on("callback_query", handleCallbackQuery);

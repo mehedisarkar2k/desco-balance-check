@@ -16,6 +16,7 @@ A Telegram bot to check DESCO (Dhaka Electric Supply Company) electricity balanc
 - **Instant Balance Check**: Check your DESCO balance on demand
 - **Runway Estimate**: Shows how many days of power you have left and the date it runs out
 - **Burn Rate**: Average daily spend in BDT and kWh, from your last 14 days of readings
+- **Custom Forecasts**: Ask for a specific daily usage ("use 7 kWh"), an increase ("1–3% more use"), or a different averaging window ("last 5 days"). Balance runway, recharge plans and monthly estimates recalculate the slabs with those assumptions.
 - **Usage Overview**: `/usage` reports any period up to 90 days — total consumption, daily average, highest/lowest day, and recharges in that window
 - **Multiple API Support**: Automatically tries both `unified` and `tkdes` API endpoints
 - **Flexible Input**: Use saved account details or enter custom ones
@@ -50,6 +51,31 @@ burn rate is computed from per-step deltas divided by the days actually spanned.
 | `/update`    | Update account details, notification times, or threshold |
 | `/subscribe` | Manage notification subscriptions                        |
 | `/help`      | Show all available commands                              |
+| `/support [issue]` | Raise or update a support ticket and get a support code |
+
+## Support tickets
+
+`/support` asks the customer to describe the problem in the bot, in Bangla, English, or Banglish. `/support <issue>` starts with those details immediately. Up to six recent AI-chat messages are attached, including rendered calculation cards; chat outside the active 30-minute AI session is not available to attach. The support conversation itself is stored in MongoDB and survives restarts.
+
+The AI assistant asks for missing details or tries to answer using read-only account tools. It cannot change settings. Failed lookups, requests for a person, unsupported problems and unresolved issues after two attempts are escalated with a summary, reason, attempted lookups and recent messages. Suggested answers do not close a ticket: the customer presses **Solved**, or the admin resolves it.
+
+When escalation is delivered, the user is told the admin will reply through the bot. The late-night notice is included only from 23:00 to 06:59 in **Asia/Dhaka**. Failed deliveries are reported honestly, and the ticket remains saved. Support text is routed for 24 hours after the last activity; `/cancel` returns to normal chat without deleting the ticket. Commands and guided account-setup flows retain priority.
+
+In the admin's private chat:
+
+- `/tickets` lists open tickets; `/tickets 2` opens the next page.
+- `/ticket <telegramId>` shows the issue, saved conversation and account settings. **Inspect balance** reads that ticket's DESCO balance without switching the admin's active account.
+- **Reply through bot**, a Telegram reply to a support notification, or `/reply <telegramId> <message>` sends a message as **Support team** through the bot. The recipient is matched to the saved ticket; no impersonation or personal Telegram conversation is needed. The customer's replies return to the admin, without further AI answers while the admin is handling it.
+- **Mark resolved** closes the ticket. Another `/support` reopens it with the latest context.
+- `/actas <6-digit support code>` is still required to act on the user's account. The code expires after 15 minutes, works once, and grants at most one hour. `/done` ends that session.
+
+If account changes are needed, ask the customer to send their current support code in the bot. A matching, unexpired code is delivered only to the admin; it is redacted from the saved transcript. Regular support messages and read-only diagnosis require no code.
+
+Older support alerts are recovered where the user's support-code expiry record still exists, even if the code has expired. Those alerts have no saved conversation; requests whose code was already consumed cannot be reconstructed. Deleting a user also deletes their ticket.
+
+## Verification
+
+Run `yarn test` to build TypeScript and run the forecast and support regressions. Tests use synthetic readings, an in-memory ticket fixture, and mocked Telegram/Gemini calls; they do not connect to the live database or send messages.
 
 ## Setup 🛠️
 

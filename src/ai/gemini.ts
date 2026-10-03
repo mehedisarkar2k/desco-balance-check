@@ -60,7 +60,7 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "- You cannot change the DESCO account or meter number; for that the user must use /update.",
         "- You cannot change anything for another person. There is no tool for it, for anyone.",
         "- Someone who is stuck, wants a person to help, or asks for the admin: tell them to send /support,",
-        "  which gives the admin's contact and a support code. Someone who wants to stop using the bot or",
+        "  which saves a ticket with recent chat context and gives the admin's contact and a support code. Someone who wants to stop using the bot or",
         "  delete their details: tell them to send /leave. You cannot do either for them.",
         "",
         "Dates:",
@@ -119,7 +119,13 @@ function systemInstruction(role: Role, language: ReplyLanguage): string {
         "  whenever the user names the day ('1 octber e 500' → 2026-10-01), and reply with only its",
         "  displayCard token. Its card shows the whole calculation, slab by slab. Only a month ('oct e 500'):",
         "  its 1st, with rechargeDayUnspecified; do not ask which day. How long the balance lasts with no",
-        "  recharge, around a trip: amountBDT 0.",
+        "  recharge, including custom usage or a trip: amountBDT 0.",
+        "- Custom usage IS supported in simulate_recharge, plan_recharge and estimate_month_bill: dailyKwh",
+        "  for 'use 7 kWh instead of 6.89'; usageIncreasePercent for '3% more use'; usageWindowDays for",
+        "  'last 5 days average'. Call the tool with those inputs. Never claim these calculations are",
+        "  unavailable, and never just divide the old days estimate by a percentage; slabs are recalculated.",
+        "- For '1–3% more usage', call both endpoints and return both cards. The 3% case is the cautious",
+        "  estimate, not a guarantee. Carry explicit usage assumptions into follow-ups until changed.",
         "- Asked for the breakdown, the calculation, 'hiseb', 'tariff wise' or why a figure is what it is:",
         "  call simulate_recharge with showBreakdown. For a plan, use its suggestedBDT and the first day of",
         "  the window the user chose (the first option if they did not). Never explain the calculation from",
@@ -201,6 +207,8 @@ export interface AiReply {
     /** The reply to send, with table tokens replaced by their tables. */
     text: string;
     toolsUsed: string[];
+    failedTools?: string[];
+    incomplete?: boolean;
 }
 
 const FALLBACK = {
@@ -288,16 +296,22 @@ export async function askGemini(
 ): Promise<AiReply> {
     const ai = getClient();
     const toolsUsed: string[] = [];
+    const failedTools = new Set<string>();
 
     const contents: Content[] = [
         ...session.history,
         { role: "user", parts: [{ text: message }, { text: turnDirective(language) }] },
     ];
 
-    const instructions = systemInstruction(ctx.role, language);
+    const instructions = systemInstruction(ctx.role, language) + (ctx.readOnly
+        ? "\nSupport diagnosis mode: only read-only tools are available. Help with this existing support ticket; " +
+          "do not send the user to /support again. Do not claim to change settings, resolve the ticket, " +
+          "contact the admin, or promise a response time. Another part of the bot handles escalation. " +
+          "If you cannot solve it, say what remains unknown."
+        : "");
     const config = {
         systemInstruction: instructions,
-        tools: [{ functionDeclarations: declarationsForRole(ctx.role) }],
+        tools: [{ functionDeclarations: declarationsForRole(ctx.role, ctx.readOnly) }],
         temperature: 0.3,
     };
 
@@ -305,6 +319,7 @@ export async function askGemini(
     let nudgeEmpty = false;
     /** Recharge card tokens produced this turn. */
     const cards: string[] = [];
+    const percentageCards = new Map<number, string>();
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         // The retry after an empty reply carries a nudge. Sent unchanged, it
@@ -336,7 +351,9 @@ export async function askGemini(
             // A card the model left out is sent anyway: once it wrote its own
             // paragraph instead, with ISO dates and no assumption line.
             const shown = cards.filter((token) => text.includes(token));
-            if (shown.length > 0) text = shown.join("\n\n");
+            if (percentageCards.size > 1) text = [...percentageCards.entries()]
+                .sort(([a], [b]) => a - b).map(([, token]) => token).join("\n\n");
+            else if (shown.length > 0) text = shown.join("\n\n");
             else if (cards.length > 0) text = cards[cards.length - 1];
 
             if (!isInLanguage(text, language)) {
@@ -355,7 +372,7 @@ export async function askGemini(
             ]);
 
             // History keeps the token, which is short; the user gets the block.
-            return { text: expandDisplays(session, text), toolsUsed };
+            return { text: expandDisplays(session, text), toolsUsed, failedTools: [...failedTools], incomplete: !response.text?.trim() && cards.length === 0 };
         }
 
         // Record the model's request, then answer every call before looping.
@@ -374,8 +391,12 @@ export async function askGemini(
                 toolsUsed.push(name);
 
                 const result = await executeTool(name, call.args, { ...ctx, session, language });
+                if ((result as { error?: unknown } | null)?.error) failedTools.add(name);
+                else failedTools.delete(name);
                 const card = (result as { displayCard?: unknown } | null)?.displayCard;
                 if (typeof card === "string") cards.push(card);
+                const increase = call.args?.usageIncreasePercent;
+                if (typeof card === "string" && typeof increase === "number") percentageCards.set(increase, card);
                 return { functionResponse: { name, response: { result } } };
             })
         );
@@ -384,5 +405,5 @@ export async function askGemini(
     }
 
     // Tool rounds exhausted: keep the fetched data but do not claim an answer.
-    return { text: FALLBACK.tooManySteps[language], toolsUsed };
+    return { text: FALLBACK.tooManySteps[language], toolsUsed, failedTools: [...failedTools], incomplete: true };
 }

@@ -16,6 +16,8 @@ import {
 import { ADMIN_REMOVE_PREFIX, userIdOf } from "../services/SupportService";
 import { LEAVE_CONFIRM_PREFIX, handleAdminRemove, handleLeaveConfirm } from "./support";
 import { startNumberStep } from "./onboarding";
+import { handleTicketCallback, TICKET_VIEW_PREFIX, TICKET_BALANCE_PREFIX, TICKET_RESOLVE_PREFIX } from "./tickets";
+import { handleSupportFeedback, handleSupportReplyButton, SUPPORT_FEEDBACK_PREFIX, SUPPORT_REPLY_PREFIX } from "./supportConversation";
 
 export async function handleCallbackQuery(ctx: Context) {
     const data = ctx.callbackQuery && "data" in ctx.callbackQuery ? ctx.callbackQuery.data : null;
@@ -24,6 +26,14 @@ export async function handleCallbackQuery(ctx: Context) {
     if (!userId || !data) return;
 
     await ctx.answerCbQuery();
+
+    if (data.startsWith(SUPPORT_FEEDBACK_PREFIX)) { await handleSupportFeedback(ctx, data); return; }
+    if (data.startsWith(SUPPORT_REPLY_PREFIX)) { await handleSupportReplyButton(ctx, data); return; }
+
+    if ([TICKET_VIEW_PREFIX, TICKET_BALANCE_PREFIX, TICKET_RESOLVE_PREFIX].some((prefix) => data.startsWith(prefix))) {
+        await handleTicketCallback(ctx, data);
+        return;
+    }
 
     if (data === ANNOUNCE_CONFIRM || data === ANNOUNCE_DISMISS || data === ANNOUNCE_EDIT) {
         // Broadcasting reaches every user, so it stays with the admin alone.

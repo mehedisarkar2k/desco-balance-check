@@ -16,13 +16,15 @@ const chatId = TELEGRAM_CHAT_ID;
 export const ADMIN_USERNAME = "MehediSarkar2k";
 export const ADMIN_CHAT_ID = 932626321;
 
-export async function sendMessage(text: string, targetChatId?: number | string) {
+export async function sendMessage(text: string, targetChatId?: number | string, extra?: Parameters<typeof bot.telegram.sendMessage>[2]): Promise<boolean> {
     try {
-        await bot.telegram.sendMessage(targetChatId || chatId, text, { parse_mode: "HTML" });
+        await bot.telegram.sendMessage(targetChatId || chatId, text, { parse_mode: "HTML", ...extra });
         console.log(`✅ Message sent to ${targetChatId || chatId}`);
+        return true;
     } catch (err: any) {
         console.error("❌ Failed to send Telegram message:", err.message);
         console.error("Message was:", text.substring(0, 100));
         // Don't throw - let the app continue running
+        return false;
     }
 }

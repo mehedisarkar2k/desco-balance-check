@@ -1,11 +1,11 @@
 import { Context } from "telegraf";
 import { UserService } from "../services/UserService";
-import { ADMIN_USERNAME } from "../bot";
 import { Markup } from "telegraf";
 import { formatCommandList } from "../botCommands";
 import { escapeHtml } from "../utils/html";
 import { userIdOf } from "../services/SupportService";
 import { startNumberStep } from "./onboarding";
+import { pauseSupportConversation } from "./supportConversation";
 
 interface GuidedStep {
     step: string;
@@ -47,6 +47,7 @@ export const userSessions = new ExpiringSteps();
 export async function handleCancel(ctx: Context) {
     const userId = userIdOf(ctx);
     if (!userId) return;
+    await pauseSupportConversation(ctx);
 
     // Any command already clears a pending step (see index.ts); this is the
     // explicit way out that the error messages point to.
@@ -87,7 +88,7 @@ You can also type a question instead of using a command — for example
 <b>About Subscriptions:</b>
 When subscribed, you'll receive automatic balance notifications at your chosen times. You can also set a low balance threshold for alerts.
 
-Need help? Use /support to contact @${ADMIN_USERNAME}. To stop using the bot, use /leave.
+Need help? Use /support and describe the issue here. AI will try to help, then pass it to the admin if needed. To stop using the bot, use /leave.
 `;
     await ctx.reply(helpText, { parse_mode: "HTML" });
 }

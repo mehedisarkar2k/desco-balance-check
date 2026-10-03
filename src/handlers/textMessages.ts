@@ -11,6 +11,7 @@ import { userIdOf } from "../services/SupportService";
 import { ADMIN_CHAT_ID, bot } from "../bot";
 import { getPendingText, sendAnnouncementPreview, setPendingText } from "../utils/announcer";
 import { rewriteAnnouncement } from "../ai/announcementEditor";
+import { handleAdminSupportReply, handleSupportConversation } from "./supportConversation";
 
 export async function handleTextMessage(ctx: Context) {
     const userId = userIdOf(ctx);
@@ -18,12 +19,15 @@ export async function handleTextMessage(ctx: Context) {
 
     if (!userId || !text) return;
 
+    if (await handleAdminSupportReply(ctx, text)) return;
+
     const session = userSessions.get(userId);
 
     // No guided flow in progress, so treat it as a question for the assistant.
     // Setup and update flows keep priority: a bare number mid-flow is an answer
     // to the question just asked, not a new request.
     if (!session) {
+        if (await handleSupportConversation(ctx, text)) return;
         await handleAiMessage(ctx, text);
         return;
     }

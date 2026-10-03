@@ -228,7 +228,7 @@ const RECHARGE_WINDOW_DAYS = 365;
  * Fetches the balance and, when possible, the recent daily series to derive a
  * burn rate. A failure to get the series is not fatal.
  */
-export async function getBalanceReport(params: FetchBalanceParams): Promise<{
+export async function getBalanceReport(params: FetchBalanceParams, historyDays = TARIFF_WINDOW_DAYS): Promise<{
     success: boolean;
     report?: BalanceReport;
     error?: string;
@@ -244,7 +244,7 @@ export async function getBalanceReport(params: FetchBalanceParams): Promise<{
         };
     }
 
-    const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, TARIFF_WINDOW_DAYS);
+    const { dateFrom, dateTo } = consumptionRange(result.data.readingTime, Math.max(TARIFF_WINDOW_DAYS, historyDays));
     const today = todayInBillingZone();
 
     // Asked for alongside the daily series, not after it. Without them the

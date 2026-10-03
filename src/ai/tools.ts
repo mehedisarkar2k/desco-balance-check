@@ -34,6 +34,7 @@ import type { ReplyLanguage } from "./language";
 import { CardOption, renderRechargeCard, renderSimulationCard } from "./rechargeCard";
 import { ADMIN_CHAT_ID, bot } from "../bot";
 import { ADMIN_REMOVE_PREFIX, describeUser } from "../services/SupportService";
+import { parseUsageOptions, resolveUsageScenario, UsageOptions, UsageScenario } from "../domain/usageScenario";
 
 export type Role = "user" | "admin";
 
@@ -45,6 +46,8 @@ export interface ToolContext {
     meterNo?: string;
     /** The reply language, for blocks rendered in code rather than written by the model. */
     language: ReplyLanguage;
+    /** Support diagnosis cannot mutate an account, even if the model asks. */
+    readOnly?: boolean;
 }
 
 interface Tool {
@@ -211,7 +214,22 @@ function describeCharges(months: string[], terms: RechargeTerms) {
     };
 }
 
-interface ProjectionInputs {
+const usageProperties = {
+    dailyKwh: {
+        type: Type.NUMBER,
+        description: "Optional assumed kWh per day, e.g. 7 for 'use 7 instead of 6.89'. Reprices each day's slabs. Do not combine with usageWindowDays.",
+    },
+    usageWindowDays: {
+        type: Type.INTEGER,
+        description: "Optional averaging window, 1–90 days, e.g. 5 for 'last 5 days average'. Default 14. Does not shorten tariff history.",
+    },
+    usageIncreasePercent: {
+        type: Type.NUMBER,
+        description: "Optional percent increase in daily kWh, e.g. 3 for 3% more usage. Applies to dailyKwh or the chosen average. For a range such as 1–3%, call once for each endpoint.",
+    },
+};
+
+interface ProjectionInputs extends UsageScenario {
     balance: number;
     balanceDate: string;
     kwhPerDay: number;
@@ -235,30 +253,34 @@ interface ProjectionInputs {
  * runway shown in /balance, so "your balance lasts until 12 Oct" and "recharge
  * X to reach the 31st" come from one projection and cannot disagree.
  */
-async function projectionInputs(params: { accountNo?: string; meterNo?: string }): Promise<ProjectionInputs | { error: string }> {
-    const report = await getBalanceReport(params);
+async function projectionInputs(params: { accountNo?: string; meterNo?: string }, args: UsageOptions = {}): Promise<ProjectionInputs | { error: string }> {
+    const options = parseUsageOptions(args);
+    if ("error" in options) return options;
+    const report = await getBalanceReport(params, (options.usageWindowDays ?? USAGE_WINDOW_DAYS) + 1);
     if (!report.success || !report.report) return { error: report.error ?? "Could not reach DESCO" };
 
     const { data, usage, rows, recharges, terms, pending } = report.report;
-    if (!usage || !rows) return { error: "Not enough daily readings to project usage yet." };
+    if (!rows) return { error: "Not enough daily readings to project usage yet." };
+    const scenario = resolveUsageScenario(rows, usage, options, USAGE_WINDOW_DAYS);
+    if ("error" in scenario) return scenario;
 
     const units = monthToDateUnits(rows, data.readingTime);
     if (units === null) return { error: "Not enough daily readings this month to price future usage." };
 
-    const probe = spendDays(rows, data.readingTime, usage.kwhPerDay, units);
+    const probe = spendDays(rows, data.readingTime, scenario.kwhPerDay, units);
     if (!probe) return { error: "Could not work out the tariff from the readings." };
 
     return {
         balance: data.balance,
         balanceDate: data.readingTime,
-        kwhPerDay: usage.kwhPerDay,
+        ...scenario,
         monthToDateKwh: units,
         monthToDateBDT: data.currentMonthTaka,
         days: (away, scale = 1) => {
             const kwhOn = away
                 ? (date: string) => (date >= away.from && date <= away.until ? away.kwhPerDay : undefined)
                 : undefined;
-            return spendDays(rows, data.readingTime, usage.kwhPerDay * scale, units, kwhOn) ?? [];
+            return spendDays(rows, data.readingTime, scenario.kwhPerDay * scale, units, kwhOn) ?? [];
         },
         terms,
         pending,
@@ -277,7 +299,11 @@ async function projectionInputs(params: { accountNo?: string; meterNo?: string }
  */
 function rechargeAssumptions(inputs: ProjectionInputs, away?: Away | null) {
     const { terms } = inputs;
-    const home = `${inputs.kwhPerDay.toFixed(2)} kWh a day at home, the average of the last 14 days`;
+    const basis = inputs.usageWindowDays === null
+        ? "the daily rate you specified"
+        : `the last ${inputs.usageWindowDays} days' average (${inputs.sampleDays} days available)`;
+    const home = `${inputs.kwhPerDay.toFixed(2)} kWh a day at home, based on ${basis}` +
+        (inputs.usageIncreasePercent ? ` plus ${inputs.usageIncreasePercent}% usage` : "");
     const awayPart = !away
         ? ""
         : away.kwhPerDay > 0
@@ -285,6 +311,13 @@ function rechargeAssumptions(inputs: ProjectionInputs, away?: Away | null) {
             : `; nothing from ${away.from} to ${away.until} while away, with everything off`;
 
     return {
+        usageScenario: {
+            dailyKwh: inputs.kwhPerDay,
+            baseDailyKwh: inputs.baseKwhPerDay,
+            usageWindowDays: inputs.usageWindowDays,
+            sampleDays: inputs.sampleDays,
+            usageIncreasePercent: inputs.usageIncreasePercent,
+        },
         mainAssumption: `Use: ${home}${awayPart}. More use, e.g. more AC, needs more.`,
         howItWasWorkedOut: [
             "Each day is priced with the slab rates found in this account's own readings; the rate resets on the 1st.",
@@ -454,6 +487,7 @@ const TOOLS: Record<string, Tool> = {
             parameters: {
                 type: Type.OBJECT,
                 properties: {
+                    ...usageProperties,
                     until: {
                         type: Type.STRING,
                         description: "Last day to cover, YYYY-MM-DD. For all of next month, its last day.",
@@ -509,7 +543,7 @@ const TOOLS: Record<string, Tool> = {
                 until = shiftDate(away.until, 1 + TRIP_BUFFER_DAYS);
             }
 
-            const inputs = await projectionInputs(params);
+            const inputs = await projectionInputs(params, args);
             if ("error" in inputs) return inputs;
 
             const forecast = forecastThrough(inputs.days(away), until, inputs.balance);
@@ -584,7 +618,9 @@ const TOOLS: Record<string, Tool> = {
                 safeOnlyBDT: safeOnly,
                 pendingNext,
                 kwhPerDay: inputs.kwhPerDay,
-                usageWindowDays: USAGE_WINDOW_DAYS,
+                usageWindowDays: inputs.usageWindowDays,
+                sampleDays: inputs.sampleDays,
+                usageIncreasePercent: inputs.usageIncreasePercent,
                 safeMarginPercent: Math.round(SAFE_MARGIN * 100),
                 earlierDeparturePossible: Boolean(away && args?.earlierDeparturePossible),
                 savedCopyAsOf: savedCopyAsOf(...inputs.freshnessSources),
@@ -627,7 +663,7 @@ const TOOLS: Record<string, Tool> = {
                     }
                     : {}),
                 ...(safeOnly ? { safeBDT: safeOnly } : {}),
-                safeMeans: `Still enough if use is ${Math.round(SAFE_MARGIN * 100)}% above the recent average.`,
+                safeMeans: `Still enough if use is ${Math.round(SAFE_MARGIN * 100)}% above the selected usage scenario.`,
                 ...(pendingNext ? { fixedChargesDueNextRecharge: describeCharges(pendingNext.months, terms) } : {}),
                 ...(warnings.length ? { warning: warnings[0] } : {}),
                 ...rechargeAssumptions(inputs, away),
@@ -645,10 +681,12 @@ const TOOLS: Record<string, Tool> = {
                 "recharge are spent until they run out. The fixed charges depend on the month the recharge is " +
                 "made in, so pass rechargeOn whenever the user names a day. Returns a displayCard token with the " +
                 "breakdown written out. Use for 'if I recharge X (on day D), how long will it last' and for any " +
-                "request to show the calculation or a tariff-wise breakdown.",
+                "request to show the calculation or a tariff-wise breakdown. Also use with amountBDT 0 for custom " +
+                "daily consumption, percentage increases, or a different averaging window without recharging.",
             parameters: {
                 type: Type.OBJECT,
                 properties: {
+                    ...usageProperties,
                     amountBDT: {
                         type: Type.NUMBER,
                         description:
@@ -715,7 +753,7 @@ const TOOLS: Record<string, Tool> = {
             const away = parseAway(args, today, shiftDate(today, 400));
             if (away && "error" in away) return away;
 
-            const inputs = await projectionInputs(params);
+            const inputs = await projectionInputs(params, args);
             if ("error" in inputs) return inputs;
 
             // The charges follow the month the recharge is made in. Priced as
@@ -765,7 +803,9 @@ const TOOLS: Record<string, Tool> = {
                 showBreakdown: Boolean(args?.showBreakdown),
                 slabs: inputs.slabs,
                 kwhPerDay: inputs.kwhPerDay,
-                usageWindowDays: USAGE_WINDOW_DAYS,
+                usageWindowDays: inputs.usageWindowDays,
+                sampleDays: inputs.sampleDays,
+                usageIncreasePercent: inputs.usageIncreasePercent,
                 savedCopyAsOf: savedCopyAsOf(...inputs.freshnessSources),
             });
 
@@ -780,7 +820,10 @@ const TOOLS: Record<string, Tool> = {
                 ...(warning ? { warning } : {}),
                 ...(away ? { awayFrom: away.from, awayUntil: away.until, awayKwhPerDay: away.kwhPerDay } : {}),
                 balanceNowBDT: inputs.balance,
+                balanceDate: inputs.balanceDate,
                 lastsUntilWithoutRecharge: without,
+                daysRemainingWithoutRecharge: without
+                    ? Math.max(0, Math.round((Date.parse(without) - Date.parse(today)) / 86_400_000)) : null,
                 lastsUntilWithRecharge: withRecharge ?? "more than 400 days",
                 ...(timeline.runsOutBeforeRecharge ? { runsOutBeforeTheRecharge: timeline.runsOutBeforeRecharge } : {}),
                 ...(away && withRecharge && withRecharge >= away.from && withRecharge <= away.until
@@ -804,6 +847,7 @@ const TOOLS: Record<string, Tool> = {
             parameters: {
                 type: Type.OBJECT,
                 properties: {
+                    ...usageProperties,
                     month: {
                         type: Type.STRING,
                         description: "YYYY-MM. This month or a later one; leave out for this month.",
@@ -827,7 +871,7 @@ const TOOLS: Record<string, Tool> = {
                 return { error: "Estimates reach at most 120 days ahead; usage that far out is too uncertain to price." };
             }
 
-            const inputs = await projectionInputs(params);
+            const inputs = await projectionInputs(params, args);
             if ("error" in inputs) return inputs;
 
             // On the last day of a month nothing is left to project, and the
@@ -874,7 +918,7 @@ const TOOLS: Record<string, Tool> = {
                 note:
                     "This is what the month's electricity costs, whenever it is paid. It is not how much to " +
                     "recharge: part of it comes out of the current balance.",
-                mainAssumption: rechargeAssumptions(inputs).mainAssumption,
+                ...rechargeAssumptions(inputs),
             }, ...inputs.freshnessSources);
         },
     },
@@ -1395,9 +1439,16 @@ const TOOLS: Record<string, Tool> = {
 };
 
 /** Tool declarations this role may see. Admins get everything. */
-export function declarationsForRole(role: Role): FunctionDeclaration[] {
+const READ_ONLY_TOOLS = new Set([
+    "get_balance", "show_balance_update", "plan_recharge", "simulate_recharge", "estimate_month_bill",
+    "get_daily_usage", "get_recharge_history", "get_monthly_consumption", "get_account_info",
+    "get_my_settings", "get_tariff_breakdown",
+]);
+
+export function declarationsForRole(role: Role, readOnly = false): FunctionDeclaration[] {
     return Object.values(TOOLS)
         .filter((tool) => role === "admin" || tool.minRole === "user")
+        .filter((tool) => !readOnly || READ_ONLY_TOOLS.has(tool.declaration.name ?? ""))
         .map((tool) => tool.declaration);
 }
 
@@ -1416,6 +1467,9 @@ export async function executeTool(
 ): Promise<unknown> {
     const tool = TOOLS[name];
     if (!tool) return { error: `Unknown tool: ${name}` };
+    if (ctx.readOnly && !READ_ONLY_TOOLS.has(name)) {
+        return { error: "Support diagnosis is read-only. An admin must handle account changes with the user's support code." };
+    }
 
     if (tool.minRole === "admin" && ctx.role !== "admin") {
         console.warn(`Blocked admin tool "${name}" for non-admin user ${ctx.userId}`);

@@ -6,7 +6,7 @@ import { resetSession } from "../ai/session";
 import { escapeHtml } from "../utils/html";
 
 /** A support code has to be used this soon after the user asked for it. */
-const CODE_TTL_MS = 15 * 60 * 1000;
+export const CODE_TTL_MS = 15 * 60 * 1000;
 
 /** Callback data for the admin's confirm button when removing a user from chat; the id follows it. */
 export const ADMIN_REMOVE_PREFIX = "admin_remove:";

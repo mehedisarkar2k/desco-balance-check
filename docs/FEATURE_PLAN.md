@@ -63,7 +63,7 @@ One adapter per provider, each declaring what it supports (balance, daily usage,
 
 ## Admin: user list, contact and support threads
 
-Today the admin finds users with "list users" in chat and removes one with "X ke remove koro", which sends a confirm button. Users have /support (a one-time code that lets the admin act for them with /actas) and /leave.
+Today the admin finds users with "list users" in chat and removes one with "X ke remove koro", which sends a confirm button. Users have /support (a saved ticket with recent conversation and a one-time code for /actas) and /leave. Support now gathers details in the bot, attempts read-only AI diagnosis, and escalates unresolved issues. The admin can review with /tickets or /ticket, inspect the balance, reply through the bot, and mark tickets resolved. Account changes still use /actas.
 
 ### Part 1: user list and contact (easy, about 200 lines)
 
@@ -74,7 +74,9 @@ Today the admin finds users with "list users" in chat and removes one with "X ke
    - Keep one pending draft, and put its number in the button data, so Send on an older preview cannot send the newer text.
    - Report a failed delivery (403 means the user blocked the bot) instead of claiming it was sent.
 
-### Part 2: support threads (medium; the risky part, about 200 more lines)
+### Part 2: support threads (implemented for text)
+
+The implementation uses persisted Telegram reply-message IDs to route admin replies, plus `/reply <id> <message>`. Replies are sent as typed from the bot. Threads remain active for 24 hours after activity, or until `/cancel` or resolution. The original outline below is retained for comparison; attachments and optional AI polishing remain future work.
 
 5. Send opens a thread with that user. While it is open, the user's messages go to the admin as "💬 Name (ID …): …" instead of to the AI. The admin replies with Telegram's reply, and the reply goes to the user. A Close button, or a period without messages, ends it.
    - Store the open thread on the user's record, not in memory: restarts would otherwise drop it and the user's messages would silently go to the AI.

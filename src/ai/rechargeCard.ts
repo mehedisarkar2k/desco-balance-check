@@ -47,7 +47,9 @@ export interface CardInput {
     /** Charges the next recharge will take, when no recharge is needed before `until`. */
     pendingNext: CardCharges | null;
     kwhPerDay: number;
-    usageWindowDays: number;
+    usageWindowDays: number | null;
+    sampleDays?: number | null;
+    usageIncreasePercent?: number;
     safeMarginPercent: number;
     /** The departure date was uncertain and the later one was planned for. */
     earlierDeparturePossible: boolean;
@@ -113,11 +115,18 @@ function awayLine(away: CardAway, language: ReplyLanguage): string {
 }
 
 /** "দিনে ~6.7 kWh (গত 14 দিনের গড়), বাইরে থাকলে ~1.2 kWh". */
-function usageAssumption(kwhPerDay: number, windowDays: number, away: CardAway | null, language: ReplyLanguage): string {
+function usageAssumption(kwhPerDay: number, windowDays: number | null, away: CardAway | null, language: ReplyLanguage, sampleDays?: number | null, increase = 0): string {
     const bn = language === "bn";
+    let basis = windowDays === null
+        ? (bn ? "আপনার দেওয়া দৈনিক ব্যবহার" : "your specified daily use")
+        : (bn ? `গত ${windowDays} দিনের গড়` : `your last ${windowDays} days' average`);
+    if (windowDays !== null && sampleDays != null && sampleDays < windowDays) {
+        basis += bn ? `, ${sampleDays} দিনের ডেটা পাওয়া গেছে` : `, ${sampleDays} days available`;
+    }
+    if (increase) basis += bn ? `, ব্যবহার ${increase}% বাড়িয়ে` : `, with ${increase}% more use`;
     const home = bn
-        ? `দিনে ~${kwhPerDay.toFixed(1)} kWh (গত ${windowDays} দিনের গড়)`
-        : `~${kwhPerDay.toFixed(1)} kWh a day (your last ${windowDays} days' average)`;
+        ? `দিনে ~${kwhPerDay.toFixed(2)} kWh (${basis})`
+        : `~${kwhPerDay.toFixed(2)} kWh a day (${basis})`;
     if (!away) return home;
     if (away.kwhPerDay > 0) {
         return bn ? `${home}, বাইরে থাকলে ~${away.kwhPerDay} kWh` : `${home}, ~${away.kwhPerDay} kWh while away`;
@@ -201,8 +210,8 @@ export function renderRechargeCard(input: CardInput): string {
         : "";
     const earlier = input.earlierDeparturePossible ? (bn ? " আগে গেলে একটু কম লাগবে।" : " Leaving earlier costs a little less.") : "";
     lines.push("", bn
-        ? `<i>অনুমান: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "bn")}।${safe}${earlier}</i>`
-        : `<i>Estimate: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "en")}.${safe}${earlier}</i>`);
+        ? `<i>অনুমান: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "bn", input.sampleDays, input.usageIncreasePercent)}।${safe}${earlier}</i>`
+        : `<i>Estimate: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "en", input.sampleDays, input.usageIncreasePercent)}.${safe}${earlier}</i>`);
 
     const saved = savedCopyLine(input.savedCopyAsOf, input.language);
     if (saved) lines.push(saved);
@@ -242,7 +251,9 @@ export interface SimulationInput {
     /** The month's slabs, from the readings, for the rates line. */
     slabs: { thresholds: number[]; rates: number[] } | null;
     kwhPerDay: number;
-    usageWindowDays: number;
+    usageWindowDays: number | null;
+    sampleDays?: number | null;
+    usageIncreasePercent?: number;
     savedCopyAsOf: string | null;
 }
 
@@ -323,6 +334,10 @@ export function renderSimulationCard(input: SimulationInput): string {
     lines.push(input.runsOutOn
         ? (bn ? `চলবে <b>~${d(input.runsOutOn)}</b> পর্যন্ত${without}` : `Lasts until <b>~${d(input.runsOutOn)}</b>${without}`)
         : (bn ? "চলবে 1 বছরের বেশি" : "Lasts more than a year"));
+    if (input.runsOutOn) {
+        const days = Math.max(0, Math.round((Date.parse(input.runsOutOn) - Date.parse(input.today)) / 86_400_000));
+        lines.push(bn ? `আজ থেকে আনুমানিক ${days} দিন।` : `About ${days} days from today.`);
+    }
 
     if (recharging) {
         const charge = input.charges.months.length > 0
@@ -379,8 +394,8 @@ export function renderSimulationCard(input: SimulationInput): string {
     }
 
     lines.push("", bn
-        ? `<i>অনুমান: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "bn")}।</i>`
-        : `<i>Estimate: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "en")}.</i>`);
+        ? `<i>অনুমান: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "bn", input.sampleDays, input.usageIncreasePercent)}।</i>`
+        : `<i>Estimate: ${usageAssumption(input.kwhPerDay, input.usageWindowDays, input.away, "en", input.sampleDays, input.usageIncreasePercent)}.</i>`);
 
     const saved = savedCopyLine(input.savedCopyAsOf, input.language);
     if (saved) lines.push(saved);

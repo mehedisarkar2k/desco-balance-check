@@ -10,12 +10,17 @@ import {
     stopActing,
     userIdOf,
 } from "../services/SupportService";
-import { ADMIN_CHAT_ID, ADMIN_USERNAME, sendMessage } from "../bot";
+import { ADMIN_CHAT_ID, sendMessage } from "../bot";
 import { resetSession } from "../ai/session";
 import { refreshSchedules } from "../scheduler";
 import { userSessions } from "./commands";
 import { deleteSnapshotsFor } from "../descoStore";
 import { User } from "../models/User";
+import { SupportTicket } from "../models/SupportTicket";
+import { raiseSupportTicket } from "../services/SupportTicketService";
+import { detectReplyLanguage } from "../ai/language";
+import { supportIntake } from "../utils/supportText";
+import { handleSupportConversation, notifySupportAdmin, supportFeedbackButtons } from "./supportConversation";
 
 /** Callback data for confirming /leave; the account id follows it. */
 export const LEAVE_CONFIRM_PREFIX = "leave_confirm:";
@@ -28,36 +33,34 @@ export async function handleSupport(ctx: Context) {
     // is consent from the person holding it.
     const senderId = ctx.from?.id;
     if (!senderId) return;
+    if (ctx.chat?.type !== "private") {
+        await ctx.reply("Please send /support in a private chat with this bot.");
+        return;
+    }
 
+    const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
+    const issue = text.replace(/^\/support(?:@\w+)?\s*/i, "").trim();
+    const ticket = await raiseSupportTicket(senderId, issue);
     const code = await issueSupportCode(senderId);
 
-    await ctx.reply(
-        "🆘 <b>Contact the admin</b>\n\n" +
-        `Message @${ADMIN_USERNAME} with your question.\n\n` +
-        `Your support code: <code>${code}</code>\n\n` +
-        "Share this code only with the admin, and only if they ask for it. It lets them see and change " +
-        "your bot settings, or remove you from the bot, for up to 1 hour. It works once, within 15 minutes; " +
-        "send /support again for a new one. You'll get a message when they start and when they finish.",
-        {
-            parse_mode: "HTML",
-            ...Markup.inlineKeyboard([
-                [Markup.button.url("💬 Message the admin", `https://t.me/${ADMIN_USERNAME}`)],
-            ]),
-        }
-    );
-
     const user = await UserService.getUser(senderId);
+    const language = detectReplyLanguage(issue) ?? user?.language ?? "en";
+    const consent = language === "bn"
+        ? `অ্যাকাউন্টের সেটিংস বদলানোর অনুমতি চাইলে তবেই এই কোডটি এখানে পাঠাবেন: ${code} (15 মিনিটের জন্য)। অ্যাডমিন সর্বোচ্চ 1 ঘণ্টা অ্যাকাউন্টে সাহায্য করতে পারবেন।`
+        : `Only if the admin asks for permission to change your account settings, send this code here: ${code} (valid for 15 minutes). Access lasts up to 1 hour.`;
+    await ctx.reply((issue
+        ? (language === "bn" ? "🆘 আপনার সমস্যাটি পেয়েছি। AI সহকারী দেখে সাহায্যের চেষ্টা করছে। অ্যাডমিন এই সাপোর্ট কথোপকথন দেখতে পারবেন। /cancel দিয়ে সাধারণ চ্যাটে ফিরতে পারেন।" : "🆘 Your issue is saved. The AI assistant will try to help now. The admin can review this support conversation. Use /cancel to return to normal chat.")
+        : supportIntake(language)) + "\n\n" + consent, supportFeedbackButtons(ticket, language));
+
     if (senderId !== ADMIN_CHAT_ID && user) {
-        await sendMessage(
-            `🆘 <b>Support request</b> from ${describeUser(user)}.\n\n` +
-            "If you need their account, ask for their support code, then send /actas followed by the code.",
-            ADMIN_CHAT_ID
-        );
+        const delivered = await notifySupportAdmin(ticket, "🆘 New support request");
+        if (!delivered) await ctx.reply("Your ticket is saved, but the admin notification could not be delivered. You can continue describing the issue here.");
     }
+    if (issue && senderId !== ADMIN_CHAT_ID) await handleSupportConversation(ctx, issue);
 }
 
 export async function handleActAs(ctx: Context) {
-    if (ctx.from?.id !== ADMIN_CHAT_ID) return;
+    if (ctx.from?.id !== ADMIN_CHAT_ID || ctx.chat?.id !== ADMIN_CHAT_ID || ctx.chat.type !== "private") return;
 
     const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
     const code = text.split(/\s+/)[1]?.trim() ?? "";
@@ -67,7 +70,8 @@ export async function handleActAs(ctx: Context) {
         await ctx.reply(
             current
                 ? `🛠 Acting for ID <code>${current.userId}</code> until ${timeInDhaka(current.until)}. /done to stop.`
-                : "Send /actas followed by the user's 6-digit support code.",
+                : "Review raised support requests with /tickets or /ticket followed by their Telegram ID. " +
+                  "To change their account, send /actas followed by their 6-digit support code.",
             { parse_mode: "HTML" }
         );
         return;
@@ -132,6 +136,7 @@ export async function handleLeave(ctx: Context) {
 async function removeUser(userId: number): Promise<void> {
     const user = await UserService.getUser(userId);
     await UserService.deleteUser(userId);
+    await SupportTicket.deleteMany({ telegramId: userId });
     userSessions.delete(userId);
     resetSession(userId);
 
